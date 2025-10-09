@@ -14,7 +14,7 @@
 | 4 | Susi Pujiarti | [231402122] | 
 | 5 | Crosby Igresius Nainggolan | [231402125] | 
 
-### Fitur
+### Fitur :
 - **Autentikasi Pengguna** – Registrasi & login untuk pelanggan dan penyedia jasa. 
 - **Buat Pesanan** – Membuat permintaan layanan berdasarkan kategori dan lokasi.
 - **Manajemen Pesanan** – Melihat daftar pesanan aktif dan riwayat pesanan. 
@@ -25,7 +25,7 @@
 - **Detail Pekerja** – Menampilkan profil lengkap seorang pekerja, termasuk nama, foto, keahlian, pengalaman kerja, dan rating dari pengguna lain.   
 - **Profil Pengguna** – Menampilkan data pengguna, pesanan, rating, poin, dan opsi edit profil.
 
-### Deskripsi Project
+### Deskripsi Project :
 - **Jenis Project:** Cross-Platform Mobile Application  
 - **Framework:** Flutter  
 - **Bahasa Pemrograman:** Dart  
@@ -35,7 +35,7 @@
 - **Testing Platform:** Android Emulator  
 - **Version Control:** Git & GitHub
 
-### Versi Tools
+### Versi Tools :
 | Komponen | Versi |
 |-----------|--------|
 | Flutter SDK | 3.35.4 |
@@ -47,9 +47,9 @@
 | JDK | 21 |
 | Minimum Android SDK | 21 (Lollipop) |
 
-### Layout Dasar
+### Layout Dasar :
 | Halaman Utama | Buat Pesanan | Cari Pekerjaan |
 |:--------------:|:----------------:|:----------------:|
-| <img src="screenshots/home.png" width="220"/> | <img src="screenshots/createorder.png" width="220"/> | <img src="screenshots/findjob.png" width="220"/> | 
+| <img src="screenshots/home.png" width="320"/> | <img src="screenshots/createorder.png" width="320"/> | <img src="screenshots/findjob.png" width="320"/> | 
 
 
