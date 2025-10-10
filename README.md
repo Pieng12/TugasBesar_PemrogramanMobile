@@ -48,8 +48,10 @@
 | Minimum Android SDK | 21 (Lollipop) |
 
 ### Layout Dasar :
-| Halaman Utama | Buat Pesanan | Cari Pekerjaan |
-|:--------------:|:----------------:|:----------------:|
-| <img src="screenshots/home.png" width="320"/> | <img src="screenshots/createorder.png" width="320"/> | <img src="screenshots/findjob.png" width="320"/> | 
+| | | |
+|:--:|:--:|:--:|
+| <img src="screenshots/home.png" width="250"/> | <img src="screenshots/createorder.png" width="250"/> | <img src="screenshots/manageorder.png" width="250"/> |
+| <img src="screenshots/findjob.png" width="250"/> | <img src="screenshots/jobdetail.png" width="250"/> | <img src="screenshots/ranking.png" width="250"/> |
+| <img src="screenshots/workerdetail.png" width="250"/> | <img src="screenshots/sos.png" width="250"/> | <img src="screenshots/profile.png" width="250"/> | 
 
 
