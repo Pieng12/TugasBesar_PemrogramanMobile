@@ -50,8 +50,8 @@
 ### Layout Dasar :
 | | | |
 |:--:|:--:|:--:|
-| <img src="screenshots/home.png" width="250"/> | <img src="screenshots/createorder.png" width="250"/> | <img src="screenshots/manageorder.png" width="250"/> |
-| <img src="screenshots/findjob.png" width="250"/> | <img src="screenshots/jobdetail.png" width="250"/> | <img src="screenshots/ranking.png" width="250"/> |
-| <img src="screenshots/workerdetail.png" width="250"/> | <img src="screenshots/sos.png" width="250"/> | <img src="screenshots/profile.png" width="250"/> | 
+| <img src="screenshots/home.png" width="250"/> Halaman Utama | <img src="screenshots/createorder.png" width="250"/> Buat Pesanan | <img src="screenshots/manageorder.png" width="250"/> Kelola Pesanan |
+| <img src="screenshots/findjob.png" width="250"/> Cari Pekerjaan | <img src="screenshots/jobdetail.png" width="250"/> Detail Pekerjaan | <img src="screenshots/ranking.png" width="250"/> Ranking |
+| <img src="screenshots/workerdetail.png" width="250"/> Detail Pekerja | <img src="screenshots/sos.png" width="250"/> Fitur SOS | <img src="screenshots/profile.png" width="250"/> Profile | 
 
 
