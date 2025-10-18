@@ -13,6 +13,7 @@
 | 3 | Jesica Eldamaris Maha | [231402101] | 
 | 4 | Susi Pujiarti | [231402122] | 
 | 5 | Crosby Igresius Nainggolan | [231402125] | 
+| 6 | Geri Nugraha Sitepu | [231402019] |
 
 ### Fitur :
 - **Autentikasi Pengguna** – Registrasi & login untuk pelanggan dan penyedia jasa. 
