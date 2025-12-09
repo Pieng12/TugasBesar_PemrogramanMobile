@@ -15,11 +15,11 @@ return [
     */
 
     'postmark' => [
-        'key' => env('POSTMARK_API_KEY'),
+        'token' => env('POSTMARK_TOKEN'),
     ],
 
     'resend' => [
-        'key' => env('RESEND_API_KEY'),
+        'key' => env('RESEND_KEY'),
     ],
 
     'ses' => [
@@ -33,6 +33,11 @@ return [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),
             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
+    ],
+
+    'firebase' => [
+        'credentials_path' => __DIR__ . '/../storage/app/firebase/firebase_credentials.json',
+        'fcm_server_key' => env('FCM_SERVER_KEY'),
     ],
 
 ];

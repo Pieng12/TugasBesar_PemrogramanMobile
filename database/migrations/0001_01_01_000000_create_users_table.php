@@ -17,6 +17,16 @@ return new class extends Migration
             $table->string('email')->unique();
             $table->timestamp('email_verified_at')->nullable();
             $table->string('password');
+            $table->string('phone')->nullable();
+            $table->string('profile_image')->nullable();
+            // Removed user_type - all users can create jobs and take jobs
+            $table->decimal('rating', 3, 2)->default(0.00);
+            $table->integer('completed_jobs')->default(0);
+            $table->integer('total_earnings')->default(0);
+            $table->boolean('is_verified')->default(false);
+            $table->decimal('current_latitude', 10, 8)->nullable();
+            $table->decimal('current_longitude', 11, 8)->nullable();
+            $table->text('current_address')->nullable();
             $table->rememberToken();
             $table->timestamps();
         });
