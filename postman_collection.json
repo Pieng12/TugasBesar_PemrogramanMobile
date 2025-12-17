@@ -1,0 +1,303 @@
+{
+    "info": {
+        "name": "Tubes Pemob API",
+        "description": "API untuk aplikasi Flutter Tubes Pemob",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+        {
+            "name": "Authentication",
+            "item": [
+                {
+                    "name": "Register User",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"name\": \"John Doe\",\n    \"email\": \"john@example.com\",\n    \"password\": \"password123\",\n    \"phone\": \"081234567890\",\n    \"user_type\": \"customer\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/register",
+                            "host": ["{{base_url}}"],
+                            "path": ["register"]
+                        }
+                    }
+                },
+                {
+                    "name": "Login User",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"email\": \"john@example.com\",\n    \"password\": \"password123\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/login",
+                            "host": ["{{base_url}}"],
+                            "path": ["login"]
+                        }
+                    }
+                },
+                {
+                    "name": "Get User Info",
+                    "request": {
+                        "method": "GET",
+                        "header": [
+                            {
+                                "key": "Authorization",
+                                "value": "Bearer {{token}}"
+                            }
+                        ],
+                        "url": {
+                            "raw": "{{base_url}}/user",
+                            "host": ["{{base_url}}"],
+                            "path": ["user"]
+                        }
+                    }
+                },
+                {
+                    "name": "Logout User",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Authorization",
+                                "value": "Bearer {{token}}"
+                            }
+                        ],
+                        "url": {
+                            "raw": "{{base_url}}/logout",
+                            "host": ["{{base_url}}"],
+                            "path": ["logout"]
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Jobs",
+            "item": [
+                {
+                    "name": "Get All Jobs",
+                    "request": {
+                        "method": "GET",
+                        "url": {
+                            "raw": "{{base_url}}/jobs",
+                            "host": ["{{base_url}}"],
+                            "path": ["jobs"]
+                        }
+                    }
+                },
+                {
+                    "name": "Create Job",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            },
+                            {
+                                "key": "Authorization",
+                                "value": "Bearer {{token}}"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"title\": \"House Cleaning\",\n    \"description\": \"Need help cleaning my house\",\n    \"category\": \"cleaning\",\n    \"price\": 150000,\n    \"latitude\": -6.200000,\n    \"longitude\": 106.816666,\n    \"address\": \"Jakarta, Indonesia\",\n    \"scheduled_time\": \"2024-01-15 10:00:00\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/jobs",
+                            "host": ["{{base_url}}"],
+                            "path": ["jobs"]
+                        }
+                    }
+                },
+                {
+                    "name": "Get Job by ID",
+                    "request": {
+                        "method": "GET",
+                        "url": {
+                            "raw": "{{base_url}}/jobs/1",
+                            "host": ["{{base_url}}"],
+                            "path": ["jobs", "1"]
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "name": "SOS Requests",
+            "item": [
+                {
+                    "name": "Get All SOS Requests",
+                    "request": {
+                        "method": "GET",
+                        "url": {
+                            "raw": "{{base_url}}/sos",
+                            "host": ["{{base_url}}"],
+                            "path": ["sos"]
+                        }
+                    }
+                },
+                {
+                    "name": "Create SOS Request",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            },
+                            {
+                                "key": "Authorization",
+                                "value": "Bearer {{token}}"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"title\": \"Emergency Help\",\n    \"description\": \"I need immediate assistance\",\n    \"latitude\": -6.200000,\n    \"longitude\": 106.816666,\n    \"address\": \"Jakarta, Indonesia\",\n    \"reward_amount\": 50000\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/sos",
+                            "host": ["{{base_url}}"],
+                            "path": ["sos"]
+                        }
+                    }
+                },
+                {
+                    "name": "Respond to SOS",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            },
+                            {
+                                "key": "Authorization",
+                                "value": "Bearer {{token}}"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"latitude\": -6.201000,\n    \"longitude\": 106.817000\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/sos/1/respond",
+                            "host": ["{{base_url}}"],
+                            "path": ["sos", "1", "respond"]
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Location",
+            "item": [
+                {
+                    "name": "Update Location",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            },
+                            {
+                                "key": "Authorization",
+                                "value": "Bearer {{token}}"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n    \"latitude\": -6.200000,\n    \"longitude\": 106.816666,\n    \"address\": \"Jakarta, Indonesia\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/locations/update",
+                            "host": ["{{base_url}}"],
+                            "path": ["locations", "update"]
+                        }
+                    }
+                },
+                {
+                    "name": "Get Nearby Jobs",
+                    "request": {
+                        "method": "GET",
+                        "url": {
+                            "raw": "{{base_url}}/locations/nearby-jobs?latitude=-6.200000&longitude=106.816666&radius=5",
+                            "host": ["{{base_url}}"],
+                            "path": ["locations", "nearby-jobs"],
+                            "query": [
+                                {
+                                    "key": "latitude",
+                                    "value": "-6.200000"
+                                },
+                                {
+                                    "key": "longitude",
+                                    "value": "106.816666"
+                                },
+                                {
+                                    "key": "radius",
+                                    "value": "5"
+                                }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "name": "Get Nearby SOS",
+                    "request": {
+                        "method": "GET",
+                        "url": {
+                            "raw": "{{base_url}}/locations/nearby-sos?latitude=-6.200000&longitude=106.816666&radius=5",
+                            "host": ["{{base_url}}"],
+                            "path": ["locations", "nearby-sos"],
+                            "query": [
+                                {
+                                    "key": "latitude",
+                                    "value": "-6.200000"
+                                },
+                                {
+                                    "key": "longitude",
+                                    "value": "106.816666"
+                                },
+                                {
+                                    "key": "radius",
+                                    "value": "5"
+                                }
+                            ]
+                        }
+                    }
+                }
+            ]
+        }
+    ],
+    "variable": [
+        {
+            "key": "base_url",
+            "value": "http://localhost:8000/api"
+        },
+        {
+            "key": "token",
+            "value": ""
+        }
+    ]
+}
+
+
+
+
+
