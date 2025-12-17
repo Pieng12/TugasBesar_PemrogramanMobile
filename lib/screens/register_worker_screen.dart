@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'home_screen.dart';
+import '../services/api_service.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:geocoding/geocoding.dart';
 
 class RegisterWorkerScreen extends StatefulWidget {
   const RegisterWorkerScreen({super.key});
@@ -21,10 +24,15 @@ class _RegisterWorkerScreenState extends State<RegisterWorkerScreen>
   bool _isPasswordVisible = false;
   bool _isConfirmPasswordVisible = false;
   bool _agreeToTerms = false;
+  bool _isLoading = false;
+  bool _isGettingLocation = false;
+  double? _selectedLatitude;
+  double? _selectedLongitude;
   final List<String> _selectedCategories = [];
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
   late Animation<Offset> _slideAnimation;
+  final ApiService _apiService = ApiService();
 
   final List<Map<String, dynamic>> _categories = [
     {
@@ -108,6 +116,48 @@ class _RegisterWorkerScreenState extends State<RegisterWorkerScreen>
     _addressController.dispose();
     _experienceController.dispose();
     super.dispose();
+  }
+
+  Future<void> _register() async {
+    if (!_formKey.currentState!.validate()) return;
+    if (!_agreeToTerms) {
+      _showNotification('Anda harus menyetujui syarat dan ketentuan!');
+      return;
+    }
+    if (_selectedCategories.isEmpty) {
+      _showNotification('Pilih minimal satu kategori pekerjaan!');
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      final response = await _apiService.register(
+        name: _nameController.text.trim(),
+        email: _emailController.text.trim(),
+        address: _addressController.text.trim(),
+        password: _passwordController.text,
+        phone: _phoneController.text.trim(),
+      );
+
+      if (response['success']) {
+        _showNotification('Registrasi berhasil!', isSuccess: true);
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const HomeScreen()),
+        );
+      } else {
+        _showNotification(response['message'] ?? 'Registrasi gagal!');
+      }
+    } catch (e) {
+      _showNotification('Registrasi gagal: ${e.toString()}');
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
   }
 
   @override
@@ -294,21 +344,7 @@ class _RegisterWorkerScreenState extends State<RegisterWorkerScreen>
                 ),
                 const SizedBox(height: 20),
                 // Address Field
-                _buildInputField(
-                  controller: _addressController,
-                  label: 'Alamat',
-                  hint: 'Masukkan alamat lengkap Anda',
-                  icon: Icons.location_on_outlined,
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Alamat tidak boleh kosong';
-                    }
-                    if (value.length < 10) {
-                      return 'Alamat minimal 10 karakter';
-                    }
-                    return null;
-                  },
-                ),
+                _buildAddressField(),
                 const SizedBox(height: 20),
                 // Experience Field
                 _buildInputField(
@@ -632,17 +668,7 @@ class _RegisterWorkerScreenState extends State<RegisterWorkerScreen>
         ],
       ),
       child: ElevatedButton(
-        onPressed: (_agreeToTerms && _selectedCategories.isNotEmpty)
-            ? () {
-                if (_formKey.currentState!.validate()) {
-                  _showNotification('Registrasi berhasil!');
-                  Navigator.pushReplacement(
-                    context,
-                    MaterialPageRoute(builder: (context) => const HomeScreen()),
-                  );
-                }
-              }
-            : null,
+        onPressed: (_agreeToTerms && _selectedCategories.isNotEmpty && !_isLoading) ? _register : null,
         style: ElevatedButton.styleFrom(
           backgroundColor: Colors.transparent,
           shadowColor: Colors.transparent,
@@ -650,25 +676,34 @@ class _RegisterWorkerScreenState extends State<RegisterWorkerScreen>
             borderRadius: BorderRadius.circular(16),
           ),
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(
-              Icons.work_outline_rounded,
-              color: Colors.white,
-              size: 24,
-            ),
-            const SizedBox(width: 12),
-            Text(
-              'Daftar sebagai Worker',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
+        child: _isLoading
+            ? SizedBox(
+                height: 20,
+                width: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              )
+            : Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(
+                    Icons.work_outline_rounded,
+                    color: Colors.white,
+                    size: 24,
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    'Daftar sebagai Worker',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -706,13 +741,473 @@ class _RegisterWorkerScreenState extends State<RegisterWorkerScreen>
     );
   }
 
-  void _showNotification(String message) {
+  Widget _buildAddressField() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Alamat',
+          style: TextStyle(
+            color: const Color(0xFF4F4F4F),
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 8),
+        TextFormField(
+          controller: _addressController,
+          readOnly: true,
+          validator: (value) {
+            if (value == null || value.isEmpty) {
+              return 'Alamat tidak boleh kosong';
+            }
+            if (_selectedLatitude == null || _selectedLongitude == null) {
+              return 'Pilih lokasi dari peta terlebih dahulu';
+            }
+            return null;
+          },
+          style: const TextStyle(fontSize: 16, color: Color(0xFF4F4F4F)),
+          decoration: InputDecoration(
+            hintText: _selectedLatitude != null 
+                ? 'Alamat telah dipilih' 
+                : 'Pilih lokasi dari peta',
+            hintStyle: TextStyle(color: const Color(0xFFBDBDBD), fontSize: 16),
+            prefixIcon: Icon(Icons.location_on_rounded, color: const Color(0xFF2D9CDB), size: 22),
+            suffixIcon: IconButton(
+              icon: Icon(Icons.map_rounded, color: const Color(0xFF2D9CDB)),
+              onPressed: _showLocationPickerDialog,
+            ),
+            filled: true,
+            fillColor: const Color(0xFFF8F9FA),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: BorderSide(color: const Color(0xFFE0E0E0), width: 1),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: BorderSide(color: const Color(0xFFE0E0E0), width: 1),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: const BorderSide(color: Color(0xFF2D9CDB), width: 2),
+            ),
+            errorBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: const BorderSide(color: Color(0xFFEB5757), width: 1),
+            ),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: 16,
+            ),
+          ),
+        ),
+        if (_selectedLatitude != null && _selectedLongitude != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              'Koordinat: ${_selectedLatitude!.toStringAsFixed(6)}, ${_selectedLongitude!.toStringAsFixed(6)}',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.grey[600],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  void _showLocationPickerDialog() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  margin: const EdgeInsets.only(bottom: 20),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2D9CDB).withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(
+                        Icons.location_on_rounded,
+                        color: Color(0xFF2D9CDB),
+                        size: 24,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        'Pilih Lokasi',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF1E293B),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: _isGettingLocation ? null : _getCurrentLocation,
+                    icon: _isGettingLocation
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                            ),
+                          )
+                        : const Icon(Icons.my_location_rounded),
+                    label: Text(
+                      _isGettingLocation
+                          ? 'Mengambil lokasi...'
+                          : 'Gunakan Lokasi Saat Ini',
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF2D9CDB),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      elevation: 2,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(context);
+                      _showManualLocationDialog();
+                    },
+                    icon: const Icon(Icons.edit_location_alt_rounded),
+                    label: const Text('Masukkan Alamat Manual'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFF2D9CDB),
+                      side: const BorderSide(color: Color(0xFF2D9CDB)),
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _getCurrentLocation() async {
+    setState(() {
+      _isGettingLocation = true;
+    });
+
+    try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        _showNotification('Layanan lokasi tidak aktif. Silakan aktifkan di pengaturan.', isSuccess: false);
+        setState(() {
+          _isGettingLocation = false;
+        });
+        Navigator.pop(context);
+        return;
+      }
+
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          _showNotification('Izin lokasi diperlukan untuk mengambil lokasi saat ini.', isSuccess: false);
+          setState(() {
+            _isGettingLocation = false;
+          });
+          Navigator.pop(context);
+          return;
+        }
+      }
+
+      if (permission == LocationPermission.deniedForever) {
+        _showNotification('Izin lokasi ditolak permanen. Aktifkan di pengaturan.', isSuccess: false);
+        setState(() {
+          _isGettingLocation = false;
+        });
+        Navigator.pop(context);
+        return;
+      }
+
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 10),
+      );
+
+      List<Placemark> placemarks = await placemarkFromCoordinates(
+        position.latitude,
+        position.longitude,
+      );
+
+      String address = 'Lokasi tidak ditemukan';
+      if (placemarks.isNotEmpty) {
+        final place = placemarks.first;
+        address = [
+          place.street,
+          place.subLocality,
+          place.locality,
+          place.administrativeArea,
+          place.postalCode,
+          place.country,
+        ].where((s) => s != null && s.isNotEmpty).join(', ');
+      }
+
+      setState(() {
+        _isGettingLocation = false;
+        _selectedLatitude = position.latitude;
+        _selectedLongitude = position.longitude;
+        _addressController.text = address;
+      });
+
+      Navigator.pop(context);
+      _showLocationConfirmationDialog(address, position.latitude, position.longitude);
+    } catch (e) {
+      setState(() {
+        _isGettingLocation = false;
+      });
+      Navigator.pop(context);
+      _showNotification('Error mengambil lokasi: ${e.toString()}', isSuccess: false);
+    }
+  }
+
+  void _showManualLocationDialog() {
+    final searchController = TextEditingController();
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(context).viewInsets.bottom,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  margin: const EdgeInsets.only(top: 12, bottom: 20),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF2D9CDB).withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Icon(
+                              Icons.edit_location_alt_rounded,
+                              color: Color(0xFF2D9CDB),
+                              size: 24,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          const Expanded(
+                            child: Text(
+                              'Cari Alamat',
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF1E293B),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                      TextField(
+                        controller: searchController,
+                        decoration: InputDecoration(
+                          labelText: 'Masukkan alamat',
+                          hintText: 'Contoh: Jl. Sudirman No. 123, Jakarta',
+                          prefixIcon: const Icon(Icons.search_rounded),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          filled: true,
+                          fillColor: const Color(0xFFF8FAFC),
+                        ),
+                        onSubmitted: (value) async {
+                          if (value.trim().isEmpty) return;
+                          await _searchAddress(value.trim());
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: () async {
+                            if (searchController.text.trim().isEmpty) {
+                              _showNotification('Masukkan alamat terlebih dahulu', isSuccess: false);
+                              return;
+                            }
+                            await _searchAddress(searchController.text.trim());
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF2D9CDB),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: const Text('Cari'),
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _searchAddress(String address) async {
+    try {
+      List<Location> locations = await locationFromAddress(address);
+      
+      if (locations.isEmpty) {
+        _showNotification('Alamat tidak ditemukan', isSuccess: false);
+        return;
+      }
+
+      final location = locations.first;
+      List<Placemark> placemarks = await placemarkFromCoordinates(
+        location.latitude,
+        location.longitude,
+      );
+
+      String fullAddress = address;
+      if (placemarks.isNotEmpty) {
+        final place = placemarks.first;
+        fullAddress = [
+          place.street,
+          place.subLocality,
+          place.locality,
+          place.administrativeArea,
+          place.postalCode,
+          place.country,
+        ].where((s) => s != null && s.isNotEmpty).join(', ');
+      }
+
+      setState(() {
+        _selectedLatitude = location.latitude;
+        _selectedLongitude = location.longitude;
+        _addressController.text = fullAddress;
+      });
+
+      Navigator.pop(context);
+      _showLocationConfirmationDialog(fullAddress, location.latitude, location.longitude);
+    } catch (e) {
+      _showNotification('Error mencari alamat: ${e.toString()}', isSuccess: false);
+    }
+  }
+
+  void _showLocationConfirmationDialog(String address, double latitude, double longitude) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Konfirmasi Lokasi'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              address,
+              style: const TextStyle(fontSize: 14),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Koordinat: ${latitude.toStringAsFixed(6)}, ${longitude.toStringAsFixed(6)}',
+              style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Batal'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF2D9CDB),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Konfirmasi'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showNotification(String message, {bool isSuccess = false}) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
           children: [
-            const Icon(
-              Icons.check_circle_outline_rounded,
+            Icon(
+              isSuccess ? Icons.check_circle_outline : Icons.error_outline_rounded,
               color: Colors.white,
               size: 20,
             ),

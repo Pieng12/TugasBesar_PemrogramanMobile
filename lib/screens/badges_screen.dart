@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/user_model.dart' as user_model;
+import '../services/api_service.dart';
 
 class BadgesScreen extends StatefulWidget {
   const BadgesScreen({super.key});
@@ -12,6 +13,12 @@ class _BadgesScreenState extends State<BadgesScreen> with TickerProviderStateMix
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
   String _selectedCategory = 'all';
+  
+  final ApiService _apiService = ApiService();
+  List<Map<String, dynamic>> _userBadges = [];
+  List<Map<String, dynamic>> _allBadges = [];
+  bool _isLoading = true;
+  String? _error;
 
   final List<Map<String, dynamic>> _categories = [
     {'value': 'all', 'label': 'Semua', 'icon': Icons.apps},
@@ -33,12 +40,79 @@ class _BadgesScreenState extends State<BadgesScreen> with TickerProviderStateMix
       CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
     );
     _animationController.forward();
+    _loadBadgesData();
+  }
+
+  Future<void> _loadBadgesData() async {
+    try {
+      setState(() {
+        _isLoading = true;
+        _error = null;
+      });
+
+      await _apiService.loadToken();
+
+      if (_apiService.token == null) {
+        setState(() {
+          _error = 'Please login to view badges';
+          _isLoading = false;
+        });
+        return;
+      }
+
+      // Load user badges
+      final userBadgesResponse = await _apiService.getUserBadges();
+      if (userBadgesResponse['success']) {
+        setState(() {
+          _userBadges = List<Map<String, dynamic>>.from(userBadgesResponse['data']);
+        });
+      }
+
+      // Load all badges
+      final allBadgesResponse = await _apiService.getAllBadges();
+      if (allBadgesResponse['success']) {
+        setState(() {
+          _allBadges = List<Map<String, dynamic>>.from(allBadgesResponse['data']);
+        });
+      }
+
+      setState(() {
+        _isLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _error = 'Error loading badges: ${e.toString()}';
+        _isLoading = false;
+      });
+    }
   }
 
   @override
   void dispose() {
     _animationController.dispose();
     super.dispose();
+  }
+
+  bool _isBadgeEarnedFromApi(String? badgeId) {
+    if (badgeId == null) return false;
+    return _userBadges.any((userBadge) => userBadge['badge_id']?.toString() == badgeId);
+  }
+
+  IconData _getBadgeIcon(String? type) {
+    switch (type) {
+      case 'reliability':
+        return Icons.verified;
+      case 'speed':
+        return Icons.speed;
+      case 'quality':
+        return Icons.emoji_events;
+      case 'helpfulness':
+        return Icons.favorite;
+      case 'emergency':
+        return Icons.emergency;
+      default:
+        return Icons.star;
+    }
   }
 
   @override
@@ -223,7 +297,66 @@ class _BadgesScreenState extends State<BadgesScreen> with TickerProviderStateMix
   }
 
   Widget _buildBadgesGrid() {
+    if (_isLoading) {
+      return SliverToBoxAdapter(
+        child: Container(
+          padding: const EdgeInsets.all(24),
+          child: const Center(
+            child: CircularProgressIndicator(),
+          ),
+        ),
+      );
+    }
+
+    if (_error != null) {
+      return SliverToBoxAdapter(
+        child: Container(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            children: [
+              Icon(
+                Icons.error_outline,
+                color: Colors.red,
+                size: 48,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                _error!,
+                style: const TextStyle(
+                  color: Colors.red,
+                  fontSize: 16,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: _loadBadgesData,
+                child: const Text('Retry'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     final badges = _getFilteredBadges();
+    
+    if (badges.isEmpty) {
+      return SliverToBoxAdapter(
+        child: Container(
+          padding: const EdgeInsets.all(24),
+          child: const Center(
+            child: Text(
+              'Tidak ada lencana tersedia',
+              style: TextStyle(
+                color: Colors.grey,
+                fontSize: 16,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
     
     return SliverPadding(
       padding: const EdgeInsets.all(20),
@@ -238,10 +371,90 @@ class _BadgesScreenState extends State<BadgesScreen> with TickerProviderStateMix
           (context, index) {
             if (index >= badges.length) return null;
             final badge = badges[index];
-            return _buildBadgeCard(badge);
+            return _buildBadgeCardFromApi(badge);
           },
           childCount: badges.length,
         ),
+      ),
+    );
+  }
+
+  Widget _buildBadgeCardFromApi(Map<String, dynamic> badge) {
+    final isEarned = _isBadgeEarnedFromApi(badge['id']);
+    
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 15,
+            offset: const Offset(0, 4),
+          ),
+        ],
+        border: Border.all(
+          color: isEarned ? const Color(0xFF8B5CF6) : Colors.grey[200]!,
+          width: 2,
+        ),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: isEarned 
+                  ? const Color(0xFF8B5CF6).withOpacity(0.1)
+                  : Colors.grey[100],
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              _getBadgeIcon(badge['type']),
+              size: 40,
+              color: isEarned ? const Color(0xFF8B5CF6) : Colors.grey[400],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            badge['name'] ?? 'No Name',
+            style: TextStyle(
+              color: isEarned ? const Color(0xFF1E293B) : Colors.grey[600],
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            badge['description'] ?? 'No Description',
+            style: TextStyle(
+              color: Colors.grey[500],
+              fontSize: 12,
+            ),
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: isEarned 
+                  ? const Color(0xFF8B5CF6)
+                  : Colors.grey[300],
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              isEarned ? 'Diperoleh' : 'Belum Diperoleh',
+              style: TextStyle(
+                color: isEarned ? Colors.white : Colors.grey[600],
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -280,7 +493,7 @@ class _BadgesScreenState extends State<BadgesScreen> with TickerProviderStateMix
               shape: BoxShape.circle,
             ),
             child: Icon(
-              _getBadgeIcon(badge.type),
+              _getBadgeIcon(badge.type.toString()),
               color: isEarned ? _getBadgeColor(badge.type) : Colors.grey[400],
               size: 30,
             ),
@@ -334,28 +547,15 @@ class _BadgesScreenState extends State<BadgesScreen> with TickerProviderStateMix
     );
   }
 
-  List<user_model.UserBadge> _getFilteredBadges() {
-    final allBadges = _getMockBadges();
+  List<Map<String, dynamic>> _getFilteredBadges() {
+    if (_allBadges.isEmpty) return [];
     
     if (_selectedCategory == 'all') {
-      return allBadges;
+      return _allBadges;
     }
     
-    return allBadges.where((badge) {
-      switch (_selectedCategory) {
-        case 'reliability':
-          return badge.type == user_model.BadgeType.reliability;
-        case 'speed':
-          return badge.type == user_model.BadgeType.speed;
-        case 'quality':
-          return badge.type == user_model.BadgeType.quality;
-        case 'helpfulness':
-          return badge.type == user_model.BadgeType.helpfulness;
-        case 'emergency':
-          return badge.type == user_model.BadgeType.emergency;
-        default:
-          return true;
-      }
+    return _allBadges.where((badge) {
+      return badge['type'] == _selectedCategory;
     }).toList();
   }
 
@@ -448,18 +648,4 @@ class _BadgesScreenState extends State<BadgesScreen> with TickerProviderStateMix
     }
   }
 
-  IconData _getBadgeIcon(user_model.BadgeType type) {
-    switch (type) {
-      case user_model.BadgeType.reliability:
-        return Icons.verified;
-      case user_model.BadgeType.speed:
-        return Icons.speed;
-      case user_model.BadgeType.quality:
-        return Icons.emoji_events;
-      case user_model.BadgeType.helpfulness:
-        return Icons.favorite;
-      case user_model.BadgeType.emergency:
-        return Icons.emergency;
-    }
-  }
 }

@@ -1,14 +1,17 @@
 import 'package:flutter/material.dart';
 import '../models/job_model.dart';
 import 'package:shimmer/shimmer.dart';
+import '../services/api_service.dart';
 import 'create_job_screen.dart';
 import 'job_list_screen.dart';
+import 'job_detail_screen.dart';
 import 'sos_screen.dart';
 import 'profile_screen.dart';
 import 'my_orders_screen.dart';
-import 'login_screen.dart';
+import 'auth_screen.dart';
 import 'notifications_screen.dart';
 import 'leaderboard_screen.dart';
+import 'package:geolocator/geolocator.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -19,34 +22,20 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   int _selectedIndex = 0;
-  late AnimationController _animationController;
-  late Animation<double> _fadeAnimation;
 
-  final List<Widget> _screens = [
+  List<Widget> get _screens => [
     const HomeContentScreen(),
     const MyOrdersScreen(),
     const LeaderboardScreen(),
     const SOSScreen(),
-    const ProfileScreen(),
+    ProfileScreen(
+      key: ValueKey(DateTime.now().millisecondsSinceEpoch),
+    ), // Always fresh
   ];
 
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
-      duration: const Duration(milliseconds: 1000),
-      vsync: this,
-    );
-    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
-    );
-    _animationController.forward();
-  }
-
-  @override
-  void dispose() {
-    _animationController.dispose();
-    super.dispose();
   }
 
   @override
@@ -80,6 +69,15 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               setState(() {
                 _selectedIndex = index;
               });
+              // Force refresh when switching to profile tab
+              if (index == 4) {
+                // Profile tab selected, force refresh
+                Future.delayed(const Duration(milliseconds: 100), () {
+                  setState(() {
+                    // This will recreate the ProfileScreen
+                  });
+                });
+              }
             },
             backgroundColor: Colors.transparent,
             elevation: 0,
@@ -139,19 +137,23 @@ class HomeContentScreen extends StatefulWidget {
 class _HomeContentScreenState extends State<HomeContentScreen>
     with TickerProviderStateMixin {
   late AnimationController _animationController;
-  late AnimationController _headerAnimationController;
   late Animation<double> _fadeAnimation;
   late Animation<Offset> _slideAnimation;
+
+  final ApiService _apiService = ApiService();
+  List<Map<String, dynamic>> _recentJobs = [];
+  List<Map<String, dynamic>> _leaderboardPreview = [];
+  Map<String, dynamic>? _userStats;
+  Map<String, dynamic>? _userRanking;
+  bool _isLoading = true;
+  String? _error;
+  Position? _userPosition;
 
   @override
   void initState() {
     super.initState();
     _animationController = AnimationController(
-      duration: const Duration(milliseconds: 1200),
-      vsync: this,
-    );
-    _headerAnimationController = AnimationController(
-      duration: const Duration(milliseconds: 1200),
+      duration: const Duration(milliseconds: 800),
       vsync: this,
     );
 
@@ -160,47 +162,461 @@ class _HomeContentScreenState extends State<HomeContentScreen>
     );
 
     _slideAnimation =
-        Tween<Offset>(begin: const Offset(0, 0.3), end: Offset.zero).animate(
+        Tween<Offset>(begin: const Offset(0, 0.2), end: Offset.zero).animate(
           CurvedAnimation(
-            parent: _headerAnimationController,
+            parent: _animationController,
             curve: Curves.easeOutCubic,
           ),
         );
-    _headerAnimationController.forward();
     _animationController.forward();
+    _loadHomeData();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Check authentication first
+    _checkAuthentication();
+  }
+
+  Future<void> _checkAuthentication() async {
+    await _apiService.loadToken();
+    if (_apiService.token == null) {
+      // No token, redirect to login
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const AuthScreen()),
+        );
+      }
+      return;
+    }
+    // User is authenticated, load data
+    _loadHomeData();
+  }
+
+  Future<void> _getUserLocation() async {
+    try {
+      // Check if location services are enabled
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        // Show dialog to enable location services
+        if (mounted) {
+          _showLocationPermissionDialog(
+            'Layanan Lokasi Tidak Aktif',
+            'Aktifkan layanan lokasi di pengaturan untuk melihat permintaan di sekitar Anda.',
+          );
+        }
+        // Try to get location from user data as fallback
+        await _getLocationFromUserData();
+        return;
+      }
+
+      // Check location permission
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        // Request permission with explanation
+        if (mounted) {
+          final shouldRequest = await _showLocationPermissionDialog(
+            'Izin Lokasi Diperlukan',
+            'Aplikasi memerlukan izin lokasi untuk menampilkan permintaan pekerjaan di sekitar Anda (radius 10 km).',
+            showCancel: true,
+          );
+          if (!shouldRequest) {
+            await _getLocationFromUserData();
+            return;
+          }
+        }
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) {
+          if (mounted) {
+            _showLocationPermissionDialog(
+              'Izin Lokasi Ditolak',
+              'Tanpa izin lokasi, Anda tidak dapat melihat permintaan di sekitar Anda. Anda dapat mengaktifkannya nanti di pengaturan.',
+            );
+          }
+          await _getLocationFromUserData();
+          return;
+        }
+      }
+
+      if (permission == LocationPermission.deniedForever) {
+        if (mounted) {
+          _showLocationPermissionDialog(
+            'Izin Lokasi Ditolak Permanen',
+            'Izin lokasi telah ditolak permanen. Aktifkan di pengaturan perangkat untuk melihat permintaan di sekitar Anda.',
+          );
+        }
+        await _getLocationFromUserData();
+        return;
+      }
+
+      // Get current position
+      _userPosition = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 10),
+      );
+    } catch (e) {
+      print('Error getting location: $e');
+      // Try to get location from user data if available
+      await _getLocationFromUserData();
+    }
+  }
+
+  Future<void> _getLocationFromUserData() async {
+    if (_apiService.token != null) {
+      try {
+        final userResponse = await _apiService.getUser();
+        if (userResponse['success']) {
+          final userData = userResponse['data'];
+          final lat = userData['current_latitude'];
+          final lng = userData['current_longitude'];
+          if (lat != null && lng != null) {
+            _userPosition = Position(
+              latitude: lat is double ? lat : double.parse(lat.toString()),
+              longitude: lng is double ? lng : double.parse(lng.toString()),
+              timestamp: DateTime.now(),
+              accuracy: 0,
+              altitude: 0,
+              heading: 0,
+              speed: 0,
+              speedAccuracy: 0,
+              altitudeAccuracy: 0,
+              headingAccuracy: 0,
+            );
+          }
+        }
+      } catch (e) {
+        print('Error getting location from user data: $e');
+      }
+    }
+  }
+
+  Future<bool> _showLocationPermissionDialog(String title, String message, {bool showCancel = false}) async {
+    if (!mounted) return false;
+    
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF2563EB).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(
+                Icons.location_on_rounded,
+                color: Color(0xFF2563EB),
+                size: 24,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                  color: Color(0xFF1E293B),
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          message,
+          style: const TextStyle(
+            color: Color(0xFF64748B),
+            fontSize: 14,
+            height: 1.5,
+          ),
+        ),
+        actions: [
+          if (showCancel)
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text(
+                'Nanti',
+                style: TextStyle(color: Color(0xFF64748B)),
+              ),
+            ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF2563EB),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            child: Text(showCancel ? 'Izinkan' : 'Mengerti'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
+  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    return Geolocator.distanceBetween(lat1, lon1, lat2, lon2) / 1000; // Convert to km
+  }
+
+  Future<void> _loadHomeData() async {
+    try {
+      setState(() {
+        _isLoading = true;
+        _error = null;
+      });
+
+      await _apiService.loadToken();
+
+      // Get user location first
+      await _getUserLocation();
+
+      // Load nearby jobs within 10 km radius
+      List<Map<String, dynamic>> nearbyJobs = [];
+      
+      if (_userPosition != null) {
+        // Use nearby jobs API with 10 km radius
+        final jobsResponse = await _apiService.getJobs(
+          latitude: _userPosition!.latitude,
+          longitude: _userPosition!.longitude,
+          radius: 10.0, // 10 km
+        );
+        
+        if (jobsResponse['success']) {
+          // Handle paginated response
+          final data = jobsResponse['data'];
+          if (data is Map && data.containsKey('data')) {
+            nearbyJobs = List<Map<String, dynamic>>.from(data['data']);
+          } else if (data is List) {
+            nearbyJobs = List<Map<String, dynamic>>.from(data);
+          }
+        }
+      } else {
+        // Fallback: load all jobs if location not available
+        final jobsResponse = await _apiService.getJobs();
+        if (jobsResponse['success']) {
+          final data = jobsResponse['data'];
+          if (data is Map && data.containsKey('data')) {
+            nearbyJobs = List<Map<String, dynamic>>.from(data['data']);
+          } else if (data is List) {
+            nearbyJobs = List<Map<String, dynamic>>.from(data);
+          }
+        }
+      }
+
+      // Filter jobs: only pending status, not cancelled, and no assigned worker
+      // (Backend already filters, but we do double-check here for safety)
+      nearbyJobs = nearbyJobs.where((job) {
+        final status = job['status']?.toString().toLowerCase() ?? '';
+        final assignedWorkerId = job['assigned_worker_id'];
+        final isPrivateOrder = job['additional_info'] is Map && 
+                              job['additional_info']['is_private_order'] == true;
+        
+        // Only show jobs that are:
+        // 1. Status is 'pending' (menunggu/terbuka)
+        // 2. Not cancelled
+        // 3. No assigned worker (belum ada yang menerima)
+        // 4. Not a private order
+        return status == 'pending' && 
+               status != 'cancelled' && 
+               assignedWorkerId == null && 
+               !isPrivateOrder;
+      }).toList();
+
+      // Calculate and add distance for each job
+      if (_userPosition != null) {
+        for (var job in nearbyJobs) {
+          final jobLat = job['latitude'];
+          final jobLng = job['longitude'];
+          if (jobLat != null && jobLng != null) {
+            final lat = jobLat is double ? jobLat : double.tryParse(jobLat.toString());
+            final lng = jobLng is double ? jobLng : double.tryParse(jobLng.toString());
+            if (lat != null && lng != null) {
+              final distance = _calculateDistance(
+                _userPosition!.latitude,
+                _userPosition!.longitude,
+                lat,
+                lng,
+              );
+              job['distance_km'] = distance;
+            }
+          }
+        }
+
+        // Sort by distance (nearest first)
+        nearbyJobs.sort((a, b) {
+          final distA = a['distance_km'] ?? double.infinity;
+          final distB = b['distance_km'] ?? double.infinity;
+          return distA.compareTo(distB);
+        });
+      }
+
+      setState(() {
+        _recentJobs = nearbyJobs;
+      });
+
+      // Load leaderboard preview
+      final leaderboardResponse = await _apiService.getLeaderboard(limit: 3);
+      if (leaderboardResponse['success']) {
+        // Handle paginated response
+        final data = leaderboardResponse['data'];
+        if (data is Map && data.containsKey('data')) {
+          setState(() {
+            _leaderboardPreview = List<Map<String, dynamic>>.from(data['data']);
+          });
+        } else if (data is List) {
+          setState(() {
+            _leaderboardPreview = List<Map<String, dynamic>>.from(data);
+          });
+        }
+      }
+
+      // Load user stats if logged in
+      if (_apiService.token != null) {
+        try {
+          final userResponse = await _apiService.getUser();
+          if (userResponse['success']) {
+            final userData = userResponse['data'];
+            setState(() {
+              _userStats = userData;
+            });
+            
+            // Load user ranking
+            final userId = userData['id']?.toString();
+            if (userId != null) {
+              try {
+                final rankingResponse = await _apiService.getUserRanking(userId);
+                if (rankingResponse['success']) {
+                  setState(() {
+                    _userRanking = rankingResponse['data'];
+                  });
+                }
+              } catch (e) {
+                print('Error loading user ranking: $e');
+              }
+            }
+          }
+        } catch (e) {
+          // User not logged in or error, continue without user stats
+        }
+      }
+
+      setState(() {
+        _isLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _error = 'Error loading data: ${e.toString()}';
+        _isLoading = false;
+      });
+    }
   }
 
   @override
   void dispose() {
     _animationController.dispose();
     super.dispose();
-    _headerAnimationController.dispose();
+  }
+
+  String _formatTimeAgo(String? dateString) {
+    if (dateString == null) return 'Unknown time';
+    try {
+      final date = DateTime.parse(dateString);
+      final now = DateTime.now();
+      final difference = now.difference(date);
+
+      if (difference.inDays > 0) {
+        return '${difference.inDays} hari yang lalu';
+      } else if (difference.inHours > 0) {
+        return '${difference.inHours} jam yang lalu';
+      } else if (difference.inMinutes > 0) {
+        return '${difference.inMinutes} menit yang lalu';
+      } else {
+        return 'Baru saja';
+      }
+    } catch (e) {
+      return 'Unknown time';
+    }
+  }
+
+  Color _getCategoryColor(String? category) {
+    switch (category) {
+      case 'cleaning':
+        return const Color(0xFF10B981);
+      case 'maintenance':
+        return const Color(0xFF3B82F6);
+      case 'delivery':
+        return const Color(0xFF8B5CF6);
+      case 'tutoring':
+        return const Color(0xFFF59E0B);
+      case 'photography':
+        return const Color(0xFFEF4444);
+      case 'cooking':
+        return const Color(0xFFF97316);
+      case 'gardening':
+        return const Color(0xFF22C55E);
+      case 'petCare':
+        return const Color(0xFF06B6D4);
+      default:
+        return const Color(0xFF6B7280);
+    }
+  }
+
+  IconData _getCategoryIcon(String? category) {
+    switch (category) {
+      case 'cleaning':
+        return Icons.cleaning_services_rounded;
+      case 'maintenance':
+        return Icons.build_rounded;
+      case 'delivery':
+        return Icons.local_shipping_rounded;
+      case 'tutoring':
+        return Icons.school_rounded;
+      case 'photography':
+        return Icons.camera_alt_rounded;
+      case 'cooking':
+        return Icons.restaurant_rounded;
+      case 'gardening':
+        return Icons.eco_rounded;
+      case 'petCare':
+        return Icons.pets_rounded;
+      default:
+        return Icons.work_rounded;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: CustomScrollView(
-        slivers: [
-          // Modern App Bar
-          _buildSliverAppBar(),
-          // Welcome Section
-          _buildWelcomeSection(),
-          // Quick Actions
-          _buildQuickActions(),
-          // Service Categories
-          _buildServiceCategories(),
-          // Stats Overview
-          _buildStatsOverview(),
-          // Your Rank
-          _buildYourRankCard(),
-          // Leaderboard Preview
-          _buildLeaderboardPreview(),
-          // Recent Jobs
-          _buildRecentJobs(),
-          // Login Prompt
-          _buildLoginPrompt(),
-        ],
+      body: RefreshIndicator(
+        onRefresh: _loadHomeData,
+        color: const Color(0xFF2563EB),
+        backgroundColor: Colors.white,
+        child: CustomScrollView(
+          slivers: [
+            // Modern App Bar
+            _buildSliverAppBar(),
+            // Welcome Section
+            _buildWelcomeSection(),
+            // Quick Actions
+            _buildQuickActions(),
+            // Service Categories
+            _buildServiceCategories(),
+            // Stats Overview
+            _buildStatsOverview(),
+            // Your Rank
+            _buildYourRankCard(),
+            // Leaderboard Preview
+            _buildLeaderboardPreview(),
+            // Recent Jobs
+            _buildRecentJobs(),
+          ],
+        ),
       ),
     );
   }
@@ -234,9 +650,9 @@ class _HomeContentScreenState extends State<HomeContentScreen>
                 opacity: _fadeAnimation,
                 child: SlideTransition(
                   position: Tween<Offset>(
-                    begin: const Offset(0, 0.2),
+                    begin: const Offset(0, 0.3),
                     end: Offset.zero,
-                  ).animate(_headerAnimationController),
+                  ).animate(_animationController),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -248,23 +664,28 @@ class _HomeContentScreenState extends State<HomeContentScreen>
                           Row(
                             children: [
                               Container(
-                                padding: const EdgeInsets.all(12),
+                                height: 48,
+                                width: 48,
+                                padding: const EdgeInsets.all(6),
                                 decoration: BoxDecoration(
-                                  color: Colors.white.withOpacity(0.2),
+                                  color: Colors.white.withOpacity(0.25),
                                   borderRadius: BorderRadius.circular(16),
                                 ),
-                                child: const Icon(
-                                  Icons.work_outline_rounded,
-                                  color: Colors.white,
-                                  size: 24,
+                                child: Transform.scale(
+                                  scale: 2, 
+                                  child: Image.asset(
+                                    'assets/logo/Servify-nobg.png',
+                                    fit: BoxFit.contain,
+                                  ),
                                 ),
                               ),
                               const SizedBox(width: 12),
                               Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text(
-                                    'Tubes Pemob',
+
+                                   Text(
+                                    'Servify',
                                     style: Theme.of(context)
                                         .textTheme
                                         .titleLarge
@@ -275,7 +696,7 @@ class _HomeContentScreenState extends State<HomeContentScreen>
                                         ),
                                   ),
                                   Text(
-                                    'Platform Layanan On-Demand',
+                                    'Find Help, Get Things Done',
                                     style: TextStyle(
                                       color: Colors.white.withOpacity(0.8),
                                       fontSize: 11,
@@ -346,7 +767,7 @@ class _HomeContentScreenState extends State<HomeContentScreen>
                         child: Container(
                           padding: const EdgeInsets.symmetric(
                             horizontal: 16,
-                            vertical: 12,
+                            vertical: 8,
                           ),
                           decoration: BoxDecoration(
                             color: Colors.white.withOpacity(0.15),
@@ -401,6 +822,9 @@ class _HomeContentScreenState extends State<HomeContentScreen>
   }
 
   Widget _buildWelcomeSection() {
+    final userName = _userStats?['name'] ?? 'Pengguna';
+    final greeting = _getGreeting();
+    
     return SliverToBoxAdapter(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
@@ -412,19 +836,21 @@ class _HomeContentScreenState extends State<HomeContentScreen>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Selamat Datang, John Doe!',
-                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurface,
-                    fontWeight: FontWeight.bold,
+                  greeting,
+                  style: const TextStyle(
+                    color: Color(0xFF64748B),
+                    fontSize: 15,
+                    fontWeight: FontWeight.w500,
                   ),
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 6),
                 Text(
-                  'Siap membantu atau butuh bantuan hari ini?',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: Theme.of(
-                      context,
-                    ).colorScheme.onSurface.withOpacity(0.6),
+                  userName.length > 25 ? '${userName.substring(0, 25)}...' : userName,
+                  style: const TextStyle(
+                    color: Color(0xFF1E293B),
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: -0.8,
                   ),
                 ),
               ],
@@ -433,6 +859,22 @@ class _HomeContentScreenState extends State<HomeContentScreen>
         ),
       ),
     );
+  }
+
+  String _getGreeting() {
+    final hour = DateTime.now().hour;
+    if (hour < 12) return 'Selamat Pagi';
+    if (hour < 17) return 'Selamat Siang';
+    if (hour < 20) return 'Selamat Sore';
+    return 'Selamat Malam';
+  }
+
+  IconData _getGreetingIcon() {
+    final hour = DateTime.now().hour;
+    if (hour < 12) return Icons.wb_sunny_rounded;
+    if (hour < 17) return Icons.wb_twilight_rounded;
+    if (hour < 20) return Icons.wb_twilight_rounded;
+    return Icons.nightlight_round;
   }
 
   Widget _buildQuickActions() {
@@ -444,30 +886,24 @@ class _HomeContentScreenState extends State<HomeContentScreen>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'Aksi Cepat',
-                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  color: const Color(0xFF1E293B),
-                  fontWeight: FontWeight.bold,
-                  fontSize: 20,
-                ),
-              ),
-              const SizedBox(height: 20),
               Row(
                 children: [
                   Expanded(
                     child: _buildActionCard(
                       'Buat Pesanan',
-                      Icons.add_circle_outline_rounded,
-                      const Color(0xFF27AE60), // Hijau untuk Aksi / CTA
+                      Icons.add_circle_rounded,
+                      const Color(0xFF10B981),
                       'Buat pesanan layanan baru',
-                      () {
-                        Navigator.push(
+                      () async {
+                        final result = await Navigator.push(
                           context,
                           MaterialPageRoute(
                             builder: (context) => const CreateJobScreen(),
                           ),
                         );
+                        if (result == true) {
+                          _loadHomeData();
+                        }
                       },
                     ),
                   ),
@@ -476,7 +912,7 @@ class _HomeContentScreenState extends State<HomeContentScreen>
                     child: _buildActionCard(
                       'Cari Pekerjaan',
                       Icons.search_rounded,
-                      const Color(0xFF2D9CDB), // Biru Cerah untuk Brand
+                      const Color(0xFF2563EB),
                       'Temukan pekerjaan terdekat',
                       () {
                         Navigator.push(
@@ -504,53 +940,85 @@ class _HomeContentScreenState extends State<HomeContentScreen>
     String subtitle,
     VoidCallback onTap,
   ) {
-    return GestureDetector(
-      onTap: onTap, // Wrap with InkWell for better feedback
-      child: Container(
-        padding: const EdgeInsets.all(24),
-        decoration: BoxDecoration(
-          color: color.withOpacity(0.15),
-          borderRadius: BorderRadius.circular(24),
-          boxShadow: [
-            BoxShadow(
-              color: color.withOpacity(0.15),
-              blurRadius: 20,
-              offset: const Offset(0, 8),
-            ),
-          ],
-          border: Border.all(color: color.withOpacity(0.1), width: 1),
-        ),
-        child: Column(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: color.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(20),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: color.withOpacity(0.15),
+                blurRadius: 16,
+                offset: const Offset(0, 4),
               ),
-              child: Icon(icon, color: color, size: 36),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              title,
-              style: TextStyle(
-                color: color,
-                fontWeight: FontWeight.bold,
-                fontSize: 16,
+              BoxShadow(
+                color: Colors.black.withOpacity(0.04),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
               ),
-              textAlign: TextAlign.center,
+            ],
+            border: Border.all(
+              color: color.withOpacity(0.2),
+              width: 1.5,
             ),
-            const SizedBox(height: 6),
-            Text(
-              subtitle,
-              style: const TextStyle(
-                color: Color(0xFF64748B),
-                fontSize: 12,
-                height: 1.3,
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      color,
+                      color.withOpacity(0.8),
+                    ],
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: [
+                    BoxShadow(
+                      color: color.withOpacity(0.3),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Icon(icon, color: Colors.white, size: 28),
               ),
-              textAlign: TextAlign.center,
-            ),
-          ],
+              const SizedBox(height: 16),
+              Text(
+                title,
+                style: TextStyle(
+                  color: const Color(0xFF1E293B),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                  letterSpacing: -0.3,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                subtitle,
+                style: TextStyle(
+                  color: Colors.grey[600],
+                  fontSize: 11,
+                  height: 1.3,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -566,12 +1034,13 @@ class _HomeContentScreenState extends State<HomeContentScreen>
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
+                const Text(
                   'Kategori Layanan',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: const Color(0xFF1E293B),
+                  style: TextStyle(
+                    color: Color(0xFF1E293B),
                     fontWeight: FontWeight.bold,
                     fontSize: 20,
+                    letterSpacing: -0.5,
                   ),
                 ),
                 TextButton(
@@ -585,67 +1054,78 @@ class _HomeContentScreenState extends State<HomeContentScreen>
                   },
                   style: TextButton.styleFrom(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 8,
+                      horizontal: 12,
+                      vertical: 6,
                     ),
                   ),
-                  child: const Text(
-                    'Lihat Semua',
-                    style: TextStyle(
-                      color: Color(0xFF2D9CDB), // Biru Cerah untuk Brand
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                    ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: const [
+                      Text(
+                        'Lihat Semua',
+                        style: TextStyle(
+                          color: Color(0xFF2563EB),
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                      ),
+                      SizedBox(width: 4),
+                      Icon(
+                        Icons.arrow_forward_ios_rounded,
+                        color: Color(0xFF2563EB),
+                        size: 12,
+                      ),
+                    ],
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 1),
             FadeTransition(
               opacity: _fadeAnimation,
               child: GridView.count(
-                crossAxisCount: 2,
-                shrinkWrap: true, // Use a fixed number or a builder
+                crossAxisCount: 3,
+                shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
-                crossAxisSpacing: 12,
+                crossAxisSpacing: 10,
                 mainAxisSpacing: 12,
-                childAspectRatio: 1.2,
+                childAspectRatio: 0.8,
                 children: [
                   _buildCategoryCard(
                     'Pembersihan',
                     Icons.cleaning_services_rounded,
                     const Color(0xFF10B981),
-                    'Rumah, kantor, kendaraan',
+                    'cleaning',
                   ),
                   _buildCategoryCard(
                     'Perbaikan',
                     Icons.build_rounded,
                     const Color(0xFFF59E0B),
-                    'AC, elektronik, furniture',
+                    'maintenance',
                   ),
                   _buildCategoryCard(
                     'Pengiriman',
                     Icons.delivery_dining_rounded,
-                    const Color(0xFF3B82F6),
-                    'Paket, dokumen, makanan',
+                    const Color(0xFF2563EB),
+                    'delivery',
                   ),
                   _buildCategoryCard(
                     'Edukasi',
                     Icons.school_rounded,
                     const Color(0xFF8B5CF6),
-                    'Les privat, bimbingan',
+                    'tutoring',
                   ),
                   _buildCategoryCard(
                     'Fotografi',
                     Icons.camera_alt_rounded,
                     const Color(0xFFEF4444),
-                    'Pre-wedding, event, produk',
+                    'photography',
                   ),
                   _buildCategoryCard(
                     'Kuliner',
                     Icons.restaurant_rounded,
                     const Color(0xFFEC4899),
-                    'Catering, masak, kue',
+                    'cooking',
                   ),
                 ],
               ),
@@ -660,75 +1140,87 @@ class _HomeContentScreenState extends State<HomeContentScreen>
     String title,
     IconData icon,
     Color color,
-    String subtitle,
+    String categoryValue,
   ) {
-    return GestureDetector(
-      onTap: () {
-        // Wrap with InkWell for better feedback
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => const JobListScreen(),
-          ), // Pass category
-        );
-      },
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: Theme.of(context).cardColor,
-          borderRadius: BorderRadius.circular(20),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.04),
-              blurRadius: 20,
-              offset: const Offset(0, 4),
-            ),
-          ],
-          border: Border.all(color: const Color(0xFFE2E8F0), width: 1),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: color.withOpacity(0.15),
-                borderRadius: BorderRadius.circular(16),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          // Navigate to job list with category filter
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => JobListScreen(
+                initialCategory: categoryValue,
               ),
-              child: Icon(icon, color: color, size: 28),
             ),
-            const SizedBox(height: 12),
-            Text(
-              title,
-              style: const TextStyle(
-                color: Color(0xFF1E293B),
-                fontWeight: FontWeight.bold,
-                fontSize: 15,
+          );
+        },
+        borderRadius: BorderRadius.circular(18),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.03),
+                blurRadius: 10,
+                offset: const Offset(0, 2),
               ),
-              textAlign: TextAlign.center,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+            ],
+            border: Border.all(
+              color: const Color(0xFFE2E8F0),
+              width: 1,
             ),
-            const SizedBox(height: 4),
-            Text(
-              subtitle,
-              style: const TextStyle(
-                color: Color(0xFF64748B),
-                fontSize: 11,
-                height: 1.2,
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: color.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(icon, color: color, size: 26),
               ),
-              textAlign: TextAlign.center,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
+              const SizedBox(height: 10),
+              Text(
+                title,
+                style: const TextStyle(
+                  color: Color(0xFF1E293B),
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 
   Widget _buildStatsOverview() {
+    final completedJobs = _userStats?['completed_jobs'] ?? 0;
+    final totalEarnings = _userStats?['total_earnings'] ?? 0;
+    final ratingValue = _userStats?['rating'];
+    
+    // Handle rating - bisa String atau double
+    double rating = 0.0;
+    if (ratingValue != null) {
+      if (ratingValue is double) {
+        rating = ratingValue;
+      } else if (ratingValue is int) {
+        rating = ratingValue.toDouble();
+      } else if (ratingValue is String) {
+        rating = double.tryParse(ratingValue) ?? 0.0;
+      }
+    }
+    
     return SliverToBoxAdapter(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(24, 16, 24, 16),
@@ -737,18 +1229,18 @@ class _HomeContentScreenState extends State<HomeContentScreen>
           child: Container(
             padding: const EdgeInsets.all(24),
             decoration: BoxDecoration(
-              gradient: LinearGradient(
+              gradient: const LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
                 colors: [
-                  Theme.of(context).colorScheme.primary.withOpacity(0.9),
-                  Theme.of(context).colorScheme.primary,
+                  Color(0xFF2563EB),
+                  Color(0xFF3B82F6),
                 ],
               ),
               borderRadius: BorderRadius.circular(24),
               boxShadow: [
                 BoxShadow(
-                  color: const Color(0xFF2D9CDB).withOpacity(0.3),
+                  color: const Color(0xFF2563EB).withOpacity(0.3),
                   blurRadius: 20,
                   offset: const Offset(0, 8),
                 ),
@@ -762,21 +1254,24 @@ class _HomeContentScreenState extends State<HomeContentScreen>
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: Colors.white.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(16),
+                        borderRadius: BorderRadius.circular(14),
                       ),
                       child: const Icon(
-                        Icons.analytics_rounded,
+                        Icons.bar_chart_rounded,
                         color: Colors.white,
-                        size: 24,
+                        size: 22,
                       ),
                     ),
-                    const SizedBox(width: 16),
-                    Text(
-                      'Statistik Platform',
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 20,
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        'Statistik Anda',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 18,
+                          letterSpacing: -0.5,
+                        ),
                       ),
                     ),
                   ],
@@ -785,9 +1280,21 @@ class _HomeContentScreenState extends State<HomeContentScreen>
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
-                    _buildStatItem('500+', 'Pengguna Aktif'),
-                    _buildStatItem('1.2K+', 'Pesanan Selesai'),
-                    _buildStatItem('98%', 'Kepuasan'),
+                    _buildStatItem(
+                      completedJobs.toString(),
+                      'Pesanan Selesai',
+                      Icons.check_circle_outline_rounded,
+                    ),
+                    _buildStatItem(
+                      'Rp ${_formatCurrency(totalEarnings)}',
+                      'Total Pendapatan',
+                      Icons.account_balance_wallet_rounded,
+                    ),
+                    _buildStatItem(
+                      rating.toStringAsFixed(1),
+                      'Rating',
+                      Icons.star_rounded,
+                    ),
                   ],
                 ),
               ],
@@ -798,27 +1305,50 @@ class _HomeContentScreenState extends State<HomeContentScreen>
     );
   }
 
-  Widget _buildStatItem(String value, String label) {
-    return Column(
-      children: [
-        Text(
-          value,
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-            fontSize: 24,
-          ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: TextStyle(
+  String _formatCurrency(int amount) {
+    if (amount >= 1000000) {
+      return '${(amount / 1000000).toStringAsFixed(1)}J';
+    } else if (amount >= 1000) {
+      return '${(amount / 1000).toStringAsFixed(0)}K';
+    }
+    return amount.toString();
+  }
+
+  Widget _buildStatItem(String value, String label, IconData icon) {
+    return Expanded(
+      child: Column(
+        children: [
+          Icon(
+            icon,
             color: Colors.white.withOpacity(0.9),
-            fontSize: 12,
-            fontWeight: FontWeight.w500,
+            size: 20,
           ),
-        ),
-      ],
+          const SizedBox(height: 8),
+          Text(
+            value,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: 18,
+              letterSpacing: -0.5,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.85),
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+            ),
+            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
     );
   }
 
@@ -878,7 +1408,9 @@ class _HomeContentScreenState extends State<HomeContentScreen>
                 ),
                 const SizedBox(width: 12),
                 Text(
-                  '#15',
+                  _userRanking != null && _userRanking!['rank'] != null
+                      ? '#${_userRanking!['rank']}'
+                      : '-',
                   style: TextStyle(
                     color: const Color(0xFFF2994A),
                     fontWeight: FontWeight.bold,
@@ -903,12 +1435,13 @@ class _HomeContentScreenState extends State<HomeContentScreen>
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
+                const Text(
                   'Leaderboard Pekerja',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: const Color(0xFF1E293B),
+                  style: TextStyle(
+                    color: Color(0xFF1E293B),
                     fontWeight: FontWeight.bold,
                     fontSize: 20,
+                    letterSpacing: -0.5,
                   ),
                 ),
                 TextButton(
@@ -922,17 +1455,28 @@ class _HomeContentScreenState extends State<HomeContentScreen>
                   },
                   style: TextButton.styleFrom(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 8,
+                      horizontal: 12,
+                      vertical: 6,
                     ),
                   ),
-                  child: const Text(
-                    'Lihat Semua',
-                    style: TextStyle(
-                      color: Color(0xFF2D9CDB), // Biru Cerah untuk Brand
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                    ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: const [
+                      Text(
+                        'Lihat Semua',
+                        style: TextStyle(
+                          color: Color(0xFF2563EB),
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                      ),
+                      SizedBox(width: 4),
+                      Icon(
+                        Icons.arrow_forward_ios_rounded,
+                        color: Color(0xFF2563EB),
+                        size: 12,
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -975,11 +1519,38 @@ class _HomeContentScreenState extends State<HomeContentScreen>
                       ],
                     ),
                     const SizedBox(height: 20),
-                    _buildTopWorker('Ahmad Wijaya', 'Pembersihan', 1, 2450),
-                    const SizedBox(height: 12),
-                    _buildTopWorker('Siti Rahayu', 'Perbaikan', 2, 2380),
-                    const SizedBox(height: 12),
-                    _buildTopWorker('Budi Santoso', 'Pengiriman', 3, 2320),
+                    _isLoading
+                        ? Column(
+                            children: List.generate(
+                              3,
+                              (i) => Padding(
+                                padding: EdgeInsets.only(bottom: i == 2 ? 0 : 12),
+                                child: _buildLeaderboardPreviewSkeleton(),
+                              ),
+                            ),
+                          )
+                        : _leaderboardPreview.isEmpty
+                        ? const Text(
+                            'Tidak ada data leaderboard',
+                            style: TextStyle(color: Colors.grey, fontSize: 14),
+                            textAlign: TextAlign.center,
+                          )
+                        : Column(
+                            children: _leaderboardPreview.asMap().entries.map((
+                              entry,
+                            ) {
+                              final index = entry.key;
+                              final worker = entry.value;
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 12),
+                                child: _buildTopWorker(
+                                  worker['name'] ?? 'Unknown',
+                                  'User', // Simplified - all users can work
+                                  index + 1,
+                                  worker['points'] ?? 0,),
+                              );
+                            }).toList(),
+                          ),
                   ],
                 ),
               ),
@@ -1044,18 +1615,31 @@ class _HomeContentScreenState extends State<HomeContentScreen>
               ],
             ),
           ),
-          Text(
-            '$points poin',
-            style: TextStyle(
-              color: rankColor,
-              fontWeight: FontWeight.bold,
-              fontSize: 14,
-            ),
-          ),
+          
         ],
       ),
     );
   }
+
+  Widget _buildLeaderboardPreviewSkeleton() {
+    return Shimmer.fromColors(
+      baseColor: Colors.grey[300]!,
+      highlightColor: Colors.grey[100]!,
+      child: Container(
+        height: 68,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFFE2E8F0), width: 1),
+        ),
+      ),
+    );
+  }
+
+  BoxDecoration _skeletonBox() => BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+      );
 
   Widget _buildRecentJobs() {
     return SliverToBoxAdapter(
@@ -1067,12 +1651,13 @@ class _HomeContentScreenState extends State<HomeContentScreen>
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
+                const Text(
                   'Permintaan Sekitar Anda',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: const Color(0xFF1E293B),
+                  style: TextStyle(
+                    color: Color(0xFF1E293B),
                     fontWeight: FontWeight.bold,
-                    fontSize: 20,
+                    fontSize: 19,
+                    letterSpacing: -0.5,
                   ),
                 ),
                 TextButton(
@@ -1086,17 +1671,28 @@ class _HomeContentScreenState extends State<HomeContentScreen>
                   },
                   style: TextButton.styleFrom(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 8,
+                      horizontal: 12,
+                      vertical: 6,
                     ),
                   ),
-                  child: const Text(
-                    'Lihat Semua',
-                    style: TextStyle(
-                      color: Color(0xFF2D9CDB), // Biru Cerah untuk Brand
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                    ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: const [
+                      Text(
+                        'Lihat Semua',
+                        style: TextStyle(
+                          color: Color(0xFF2563EB),
+                          fontWeight: FontWeight.w600,
+                          fontSize: 12,
+                        ),
+                      ),
+                      SizedBox(width: 4),
+                      Icon(
+                        Icons.arrow_forward_ios_rounded,
+                        color: Color(0xFF2563EB),
+                        size: 12,
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -1104,37 +1700,139 @@ class _HomeContentScreenState extends State<HomeContentScreen>
             const SizedBox(height: 16),
             FadeTransition(
               opacity: _fadeAnimation,
-              child: Shimmer.fromColors(
-                baseColor: Colors.grey[300]!,
-                highlightColor: Colors.grey[100]!,
-                enabled: true, // Set to false when data is loaded
-                child: Column(
-                  children: [
-                    _buildNearbyRequestCard(
-                      'Bersihkan Rumah 3 Kamar',
-                      'Pembersihan menyeluruh rumah 3 kamar tidur',
-                      'Rp 150.000',
-                      '2 km',
-                      '4.8',
-                      '2 jam yang lalu',
-                      const Color(0xFF10B981),
-                      Icons.cleaning_services_rounded,
+              child: _isLoading
+                  ? Shimmer.fromColors(
+                      baseColor: Colors.grey[300]!,
+                      highlightColor: Colors.grey[100]!,
+                      enabled: true,
+                      child: Column(
+                        children: [
+                          _buildNearbyRequestCard(
+                            '',
+                            'Loading...',
+                            'Loading job description...',
+                            'Rp 0',
+                            '0 km',
+                            '0.0',
+                            'Loading...',
+                            const Color(0xFF10B981),
+                            Icons.cleaning_services_rounded,
+                          ),
+                          const SizedBox(height: 12),
+                          _buildNearbyRequestCard(
+                            '',
+                            'Loading...',
+                            'Loading job description...',
+                            'Rp 0',
+                            '0 km',
+                            '0.0',
+                            'Loading...',
+                            const Color(0xFF3B82F6),
+                            Icons.build_rounded,
+                          ),
+                        ],
+                      ),
+                    )
+                  : _error != null
+                  ? Container(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        children: [
+                          Icon(
+                            Icons.error_outline,
+                            color: Colors.red,
+                            size: 48,
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            _error!,
+                            style: const TextStyle(
+                              color: Colors.red,
+                              fontSize: 14,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 16),
+                          ElevatedButton(
+                            onPressed: _loadHomeData,
+                            child: const Text('Retry'),
+                          ),
+                        ],
+                      ),
+                    )
+                  : _recentJobs.isEmpty
+                  ? Container(
+                      padding: const EdgeInsets.all(20),
+                      child: const Text(
+                        'Tidak ada pekerjaan tersedia',
+                        style: TextStyle(color: Colors.grey, fontSize: 14),
+                        textAlign: TextAlign.center,
+                      ),
+                    )
+                  : Column(
+                      children: _recentJobs.take(3).map((job) {
+                        // Format distance
+                        String distanceText = 'Jarak tidak diketahui';
+                        if (job['distance_km'] != null) {
+                          final distance = job['distance_km'] is double 
+                              ? job['distance_km'] 
+                              : double.tryParse(job['distance_km'].toString());
+                          if (distance != null && distance.isFinite) {
+                            if (distance < 1) {
+                              distanceText = '${(distance * 1000).toStringAsFixed(0)} m';
+                            } else {
+                              distanceText = '${distance.toStringAsFixed(1)} km';
+                            }
+                          }
+                        } else if (_userPosition != null && job['latitude'] != null && job['longitude'] != null) {
+                          // Calculate distance if not already calculated
+                          final jobLat = job['latitude'] is double ? job['latitude'] : double.tryParse(job['latitude'].toString());
+                          final jobLng = job['longitude'] is double ? job['longitude'] : double.tryParse(job['longitude'].toString());
+                          if (jobLat != null && jobLng != null) {
+                            final distance = _calculateDistance(
+                              _userPosition!.latitude,
+                              _userPosition!.longitude,
+                              jobLat,
+                              jobLng,
+                            );
+                            if (distance < 1) {
+                              distanceText = '${(distance * 1000).toStringAsFixed(0)} m';
+                            } else {
+                              distanceText = '${distance.toStringAsFixed(1)} km';
+                            }
+                          }
+                        }
+                        
+                        // Get customer rating
+                        String ratingText = '0.0';
+                        final customer = job['customer'];
+                        if (customer != null && customer['rating'] != null) {
+                          final rating = customer['rating'];
+                          if (rating is double) {
+                            ratingText = rating.toStringAsFixed(1);
+                          } else if (rating is int) {
+                            ratingText = rating.toDouble().toStringAsFixed(1);
+                          } else if (rating is String) {
+                            ratingText = double.tryParse(rating)?.toStringAsFixed(1) ?? '0.0';
+                          }
+                        }
+                        
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: _buildNearbyRequestCard(
+                            job['id']?.toString() ?? '',
+                            job['title'] ?? 'No Title',
+                            job['description'] ?? 'No Description',
+                            'Rp ${(job['price'] is String ? double.parse(job['price']) : (job['price'] as num)).toStringAsFixed(0)}',
+                            distanceText,
+                            ratingText,
+                            _formatTimeAgo(job['created_at']),
+                            _getCategoryColor(job['category']),
+                            _getCategoryIcon(job['category']),
+                          ),
+                        );
+                      }).toList(),
                     ),
-                    const SizedBox(height: 12),
-                    _buildNearbyRequestCard(
-                      'Perbaiki AC Rusak',
-                      'AC tidak dingin, perlu perbaikan',
-                      'Rp 200.000',
-                      '1.5 km',
-                      '4.9',
-                      '5 jam yang lalu',
-                      const Color(0xFF3B82F6),
-                      Icons.build_rounded,
-                    ),
-                    // Add more shimmer placeholders if needed
-                  ],
-                ),
-              ),
             ),
           ],
         ),
@@ -1143,6 +1841,7 @@ class _HomeContentScreenState extends State<HomeContentScreen>
   }
 
   Widget _buildNearbyRequestCard(
+    String jobId,
     String title,
     String description,
     String price,
@@ -1152,314 +1851,229 @@ class _HomeContentScreenState extends State<HomeContentScreen>
     Color color,
     IconData icon,
   ) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        // This container is inside a shimmer, so white is okay.
-        color: Colors.white,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          // Navigate to job detail screen when card is tapped
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => JobDetailScreen(jobId: jobId),
+            ),
+          );
+        },
         borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 15,
-            offset: const Offset(0, 4),
-          ),
-        ],
-        border: Border.all(color: const Color(0xFFE2E8F0), width: 1),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: color.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(icon, color: color, size: 20),
+        child: Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.06),
+                blurRadius: 20,
+                offset: const Offset(0, 6),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: const TextStyle(
-                        color: Color(0xFF1E293B),
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
+              BoxShadow(
+                color: color.withOpacity(0.08),
+                blurRadius: 15,
+                offset: const Offset(0, 3),
+              ),
+            ],
+            border: Border.all(
+              color: color.withOpacity(0.15),
+              width: 1,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Header
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          color,
+                          color.withOpacity(0.8),
+                        ],
                       ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                      borderRadius: BorderRadius.circular(14),
+                      boxShadow: [
+                        BoxShadow(
+                          color: color.withOpacity(0.3),
+                          blurRadius: 8,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 4),
-                    Row(
+                    child: Icon(icon, color: Colors.white, size: 22),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(
-                          Icons.location_on_rounded,
-                          size: 12,
-                          color: const Color(0xFF94A3B8),
-                        ),
-                        const SizedBox(width: 4),
                         Text(
-                          distance,
+                          title,
                           style: const TextStyle(
-                            color: Color(0xFF64748B),
-                            fontSize: 11,
+                            color: Color(0xFF1E293B),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                            letterSpacing: -0.3,
                           ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        const SizedBox(width: 12),
-                        Icon(
-                          Icons.star_rounded,
-                          size: 12,
-                          color: Colors.amber[600],
-                        ),
-                        const SizedBox(width: 2),
-                        Text(
-                          rating,
-                          style: const TextStyle(
-                            color: Color(0xFF64748B),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
+                        const SizedBox(height: 6),
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.location_on_rounded,
+                              size: 13,
+                              color: const Color(0xFF94A3B8),
+                            ),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              child: Text(
+                                distance,
+                                style: const TextStyle(
+                                  color: Color(0xFF64748B),
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Icon(
+                              Icons.star_rounded,
+                              size: 13,
+                              color: Colors.amber[600],
+                            ),
+                            const SizedBox(width: 3),
+                            Text(
+                              rating,
+                              style: const TextStyle(
+                                color: Color(0xFF64748B),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
-                  ],
-                ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 4,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF10B981).withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  price,
-                  style: const TextStyle(
-                    color: Color(0xFF10B981),
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13,
                   ),
-                ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF10B981), Color(0xFF059669)],
+                      ),
+                      borderRadius: BorderRadius.circular(10),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFF10B981).withOpacity(0.3),
+                          blurRadius: 8,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: Text(
+                      price,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          // Description
-          Text(
-            description,
-            style: const TextStyle(
-              color: Color(0xFF64748B),
-              fontSize: 12,
-              height: 1.3,
-            ),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-          const SizedBox(height: 12),
-          // Footer
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
+              const SizedBox(height: 14),
+              // Description
               Text(
-                time,
-                style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 11),
+                description,
+                style: const TextStyle(
+                  color: Color(0xFF64748B),
+                  fontSize: 13,
+                  height: 1.4,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
-              ElevatedButton(
-                onPressed: () {
-                  showDialog(
-                    context: context,
-                    builder: (context) => AlertDialog(
-                      title: const Text('Konfirmasi'),
-                      content: Text(
-                        'Apakah Anda yakin ingin mengajukan diri untuk pekerjaan "$title"?',
+              const SizedBox(height: 16),
+              // Footer
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.access_time_rounded,
+                        size: 13,
+                        color: const Color(0xFF94A3B8),
                       ),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.pop(context),
-                          child: const Text('Batal'),
+                      const SizedBox(width: 4),
+                      Text(
+                        time,
+                        style: const TextStyle(
+                          color: Color(0xFF94A3B8),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
                         ),
-                        ElevatedButton(
-                          onPressed: () {
-                            Navigator.pop(context);
-                            _showNotification(
-                              'Mengajukan diri untuk pekerjaan ini',
-                            );
-                          },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(
-                              0xFF27AE60,
-                            ), // Hijau untuk Aksi / CTA
-                            foregroundColor: Colors.white,
-                          ),
-                          child: const Text('Ya, Ajukan'),
+                      ),
+                    ],
+                  ),
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => JobDetailScreen(jobId: jobId),
                         ),
-                      ],
+                      );
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF10B981),
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 10,
+                      ),
+                      elevation: 2,
                     ),
-                  );
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(
-                    0xFF27AE60,
-                  ), // Hijau untuk Aksi / CTA
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+                    icon: const Icon(Icons.send_rounded, size: 14),
+                    label: const Text(
+                      'Ajukan',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 8,
-                  ),
-                  elevation: 0,
-                ),
-                child: const Text(
-                  'Ajukan',
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-                ),
+                ],
               ),
             ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildLoginPrompt() {
-    return SliverToBoxAdapter(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
-        child: FadeTransition(
-          opacity: _fadeAnimation,
-          child: Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: Theme.of(context).cardColor,
-              borderRadius: BorderRadius.circular(24),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.04),
-                  blurRadius: 15,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-              border: Border.all(color: const Color(0xFFE2E8F0), width: 1),
-            ),
-            child: Column(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: const Color(
-                      0xFF2D9CDB,
-                    ).withOpacity(0.1), // Biru Cerah untuk Brand
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: const Icon(
-                    Icons.login_rounded,
-                    color: Color(0xFF2D9CDB), // Biru Cerah untuk Brand
-                    size: 32,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  'Bergabung dengan Kami',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: const Color(0xFF1E293B),
-                    fontWeight: FontWeight.bold,
-                    fontSize: 20,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Daftar sekarang untuk mengakses semua fitur dan mulai mencari pekerjaan atau memesan layanan',
-                  style: const TextStyle(
-                    color: Color(0xFF64748B),
-                    fontSize: 14,
-                    height: 1.4,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 24),
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => const LoginScreen(),
-                            ),
-                          );
-                        },
-                        style: OutlinedButton.styleFrom(
-                          side: const BorderSide(
-                            color: Color(0xFF6366F1),
-                            width: 1.5,
-                          ),
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                        ),
-                        child: const Text(
-                          'Masuk',
-                          style: TextStyle(
-                            color: Color(0xFF2D9CDB), // Biru Cerah untuk Brand
-                            fontWeight: FontWeight.w600,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: ElevatedButton(
-                        onPressed: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => const LoginScreen(),
-                            ),
-                          );
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(
-                            0xFF2D9CDB,
-                          ), // Biru Cerah untuk Brand
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                          elevation: 0,
-                        ),
-                        child: const Text(
-                          'Daftar',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
           ),
         ),
       ),
     );
   }
+
 
   Color _getRankColor(int rank) {
     switch (rank) {
@@ -1470,7 +2084,7 @@ class _HomeContentScreenState extends State<HomeContentScreen>
       case 3:
         return const Color(0xFFCD7F32); // Bronze
       default:
-        return const Color(0xFF2D9CDB); // Biru Cerah untuk Brand
+        return const Color(0xFF2563EB);
     }
   }
 

@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'register_customer_screen.dart';
 import 'register_worker_screen.dart';
 import 'home_screen.dart';
+import '../services/api_service.dart';
+import 'package:intl/intl.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -17,9 +19,12 @@ class _LoginScreenState extends State<LoginScreen>
   final _passwordController = TextEditingController();
   bool _isPasswordVisible = false;
   bool _rememberMe = false;
+  bool _isLoading = false;
+  bool _isSubmittingComplaint = false;
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
   late Animation<Offset> _slideAnimation;
+  final ApiService _apiService = ApiService();
 
   @override
   void initState() {
@@ -47,6 +52,50 @@ class _LoginScreenState extends State<LoginScreen>
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
+  }
+
+  Future<void> _login() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      print('🔐 Attempting login for: ${_emailController.text.trim()}');
+      final response = await _apiService.login(
+        email: _emailController.text.trim(),
+        password: _passwordController.text,
+      );
+
+      print('📋 Login response: $response');
+
+      if (response['success']) {
+        print('✅ Login successful, token saved');
+        _showNotification('Login berhasil!', isSuccess: true);
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const HomeScreen()),
+        );
+      } else {
+        print('❌ Login failed: ${response['message']}');
+        _showNotification(response['message'] ?? 'Login gagal!');
+      }
+    } on ApiException catch (e) {
+      print('💥 Login error: $e');
+      if (e.statusCode == 403 && e.data is Map<String, dynamic>) {
+        _showBannedDialog(Map<String, dynamic>.from(e.data));
+      } else {
+        _showNotification(e.message);
+      }
+    } catch (e) {
+      print('💥 Login error: $e');
+      _showNotification('Login gagal: ${e.toString()}');
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
   }
 
   @override
@@ -346,15 +395,7 @@ class _LoginScreenState extends State<LoginScreen>
         ],
       ),
       child: ElevatedButton(
-        onPressed: () {
-          if (_formKey.currentState!.validate()) {
-            _showNotification('Login berhasil!');
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(builder: (context) => const HomeScreen()),
-            );
-          }
-        },
+        onPressed: _isLoading ? null : _login,
         style: ElevatedButton.styleFrom(
           backgroundColor: Colors.transparent,
           shadowColor: Colors.transparent,
@@ -362,21 +403,34 @@ class _LoginScreenState extends State<LoginScreen>
             borderRadius: BorderRadius.circular(16),
           ),
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.login_rounded, color: Colors.white, size: 24),
-            const SizedBox(width: 12),
-            Text(
-              'Masuk',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
+        child: _isLoading
+            ? SizedBox(
+                height: 20,
+                width: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              )
+            : Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(
+                    Icons.login_rounded,
+                    color: Colors.white,
+                    size: 24,
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    'Masuk',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -595,13 +649,347 @@ class _LoginScreenState extends State<LoginScreen>
     );
   }
 
-  void _showNotification(String message) {
+  void _showBannedDialog(Map<String, dynamic> banData) {
+    final reason =
+        banData['ban_reason'] ??
+        banData['reason'] ??
+        'Akun Anda telah diblokir oleh admin.';
+    final bannedUntilRaw = banData['banned_until'];
+    DateTime? bannedUntil;
+    if (bannedUntilRaw != null) {
+      bannedUntil = DateTime.tryParse(bannedUntilRaw.toString());
+    }
+    final latestComplaint = banData['complaint'] as Map<String, dynamic>?;
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEF4444).withOpacity(0.15),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(
+                Icons.report_gmailerrorred_rounded,
+                color: Color(0xFFEF4444),
+              ),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Akun Diblokir',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF1E293B),
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              reason,
+              style: const TextStyle(color: Color(0xFF475569), height: 1.4),
+            ),
+            const SizedBox(height: 12),
+            if (bannedUntil != null)
+              Row(
+                children: [
+                  const Icon(
+                    Icons.calendar_today_rounded,
+                    size: 16,
+                    color: Color(0xFF94A3B8),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    DateFormat(
+                      'dd MMM yyyy, HH:mm',
+                      'id_ID',
+                    ).format(bannedUntil),
+                    style: const TextStyle(
+                      color: Color(0xFF475569),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            if (latestComplaint != null) ...[
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8FAFC),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Status Komplain Terakhir',
+                      style: TextStyle(
+                        color: Color(0xFF1E293B),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      (latestComplaint['status'] ?? 'pending')
+                          .toString()
+                          .toUpperCase(),
+                      style: const TextStyle(
+                        color: Color(0xFF2563EB),
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    if (latestComplaint['admin_notes'] != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          latestComplaint['admin_notes'].toString(),
+                          style: const TextStyle(
+                            color: Color(0xFF475569),
+                            height: 1.3,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Tutup'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _showComplaintSheet();
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF2563EB),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            child: const Text('Ajukan Komplain'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showComplaintSheet() {
+    final reasonController = TextEditingController();
+    final evidenceController = TextEditingController();
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) {
+        return Padding(
+          padding: EdgeInsets.only(
+            left: 24,
+            right: 24,
+            top: 24,
+            bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+          ),
+          child: StatefulBuilder(
+            builder: (context, setSheetState) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2563EB).withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: const Icon(
+                          Icons.forum_rounded,
+                          color: Color(0xFF2563EB),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      const Expanded(
+                        child: Text(
+                          'Ajukan Komplain',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 18,
+                            color: Color(0xFF1E293B),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Jelaskan alasan Anda',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF1E293B),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: reasonController,
+                    maxLines: 5,
+                    decoration: InputDecoration(
+                      hintText:
+                          'Tuliskan penjelasan lengkap minimal 20 karakter',
+                      filled: true,
+                      fillColor: const Color(0xFFF8FAFC),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Link bukti pendukung (opsional)',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF1E293B),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: evidenceController,
+                    decoration: InputDecoration(
+                      hintText: 'Masukkan link Google Drive / lainnya',
+                      filled: true,
+                      fillColor: const Color(0xFFF8FAFC),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        borderSide: const BorderSide(color: Color(0xFFE2E8F0)),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 52,
+                    child: ElevatedButton(
+                      onPressed: _isSubmittingComplaint
+                          ? null
+                          : () async {
+                              final explanation = reasonController.text.trim();
+                              if (explanation.length < 20) {
+                                _showNotification(
+                                  'Mohon berikan penjelasan minimal 20 karakter.',
+                                );
+                                return;
+                              }
+                              setSheetState(
+                                () => _isSubmittingComplaint = true,
+                              );
+                              final success = await _submitBanComplaint(
+                                explanation,
+                                evidenceUrl:
+                                    evidenceController.text.trim().isEmpty
+                                    ? null
+                                    : evidenceController.text.trim(),
+                              );
+                              setSheetState(
+                                () => _isSubmittingComplaint = false,
+                              );
+                              if (success && context.mounted)
+                                Navigator.pop(context);
+                            },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF2563EB),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      child: _isSubmittingComplaint
+                          ? const SizedBox(
+                              height: 20,
+                              width: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  Colors.white,
+                                ),
+                              ),
+                            )
+                          : const Text(
+                              'Kirim Komplain',
+                              style: TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Future<bool> _submitBanComplaint(
+    String explanation, {
+    String? evidenceUrl,
+  }) async {
+    setState(() {
+      _isSubmittingComplaint = true;
+    });
+    try {
+      final response = await _apiService.submitBanComplaint(
+        email: _emailController.text.trim(),
+        reason: explanation,
+        evidenceUrl: evidenceUrl,
+      );
+      _showNotification(
+        response['message'] ?? 'Komplain berhasil dikirim.',
+        isSuccess: true,
+      );
+      return true;
+    } on ApiException catch (e) {
+      _showNotification(e.message);
+      return false;
+    } catch (e) {
+      _showNotification('Gagal mengirim komplain: ${e.toString()}');
+      return false;
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSubmittingComplaint = false;
+        });
+      }
+    }
+  }
+
+  void _showNotification(String message, {bool isSuccess = false}) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
           children: [
-            const Icon(
-              Icons.info_outline_rounded,
+            Icon(
+              isSuccess
+                  ? Icons.check_circle_outline
+                  : Icons.error_outline_rounded,
               color: Colors.white,
               size: 20,
             ),

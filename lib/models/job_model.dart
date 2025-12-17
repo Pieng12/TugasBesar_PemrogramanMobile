@@ -46,13 +46,7 @@ enum JobCategory {
   other,
 }
 
-enum JobStatus {
-  pending,
-  inProgress,
-  completed,
-  cancelled,
-  disputed,
-}
+enum JobStatus { pending, inProgress, completed, cancelled, disputed }
 
 class JobApplication {
   final String id;
@@ -74,8 +68,4 @@ class JobApplication {
   });
 }
 
-enum ApplicationStatus {
-  pending,
-  accepted,
-  rejected,
-}
+enum ApplicationStatus { pending, accepted, rejected }

@@ -4,7 +4,7 @@ class UserModel {
   final String email;
   final String phone;
   final String profileImage;
-  final UserType userType;
+  // Removed userType - all users can create and take jobs
   final double rating;
   final int completedJobs;
   final int totalEarnings;
@@ -19,7 +19,7 @@ class UserModel {
     required this.email,
     required this.phone,
     required this.profileImage,
-    required this.userType,
+    // Removed userType parameter
     this.rating = 0.0,
     this.completedJobs = 0,
     this.totalEarnings = 0,
@@ -30,11 +30,7 @@ class UserModel {
   });
 }
 
-enum UserType {
-  customer,
-  worker,
-  both,
-}
+// Removed UserType enum - all users can create and take jobs
 
 class UserBadge {
   final String id;

@@ -7,6 +7,7 @@ pluginManagement {
             require(flutterSdkPath != null) { "flutter.sdk not set in local.properties" }
             flutterSdkPath
         }
+git branch -r
 
     includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
 

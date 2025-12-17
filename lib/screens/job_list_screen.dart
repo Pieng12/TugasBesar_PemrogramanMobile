@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
 import '../models/job_model.dart';
-import '../models/location_model.dart';
+import '../services/api_service.dart';
 import 'job_detail_screen.dart';
+import 'package:shimmer/shimmer.dart';
+import 'package:intl/intl.dart';
+import 'package:geolocator/geolocator.dart';
 
 class JobListScreen extends StatefulWidget {
-  const JobListScreen({super.key});
+  final String? initialCategory;
+  
+  const JobListScreen({super.key, this.initialCategory});
 
   @override
   State<JobListScreen> createState() => _JobListScreenState();
@@ -18,9 +23,24 @@ class _JobListScreenState extends State<JobListScreen>
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
 
+  final ApiService _apiService = ApiService();
+  List<Map<String, dynamic>> _jobs = [];
+  bool _isLoading = true;
+  String? _error;
+  String? _currentUserId;
+  Position? _userPosition;
+  bool _filterNearby = false;
+  final NumberFormat _priceFormatter =
+      NumberFormat.currency(locale: 'id_ID', symbol: '', decimalDigits: 0);
+
   @override
   void initState() {
     super.initState();
+    // Set initial category if provided
+    if (widget.initialCategory != null) {
+      _selectedCategory = _stringToJobCategory(widget.initialCategory);
+    }
+    
     _animationController = AnimationController(
       duration: const Duration(milliseconds: 800),
       vsync: this,
@@ -29,6 +49,255 @@ class _JobListScreenState extends State<JobListScreen>
       CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
     );
     _animationController.forward();
+    _loadJobs();
+  }
+
+  Future<void> _getUserLocation() async {
+    try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) return;
+
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.denied) return;
+      }
+
+      if (permission == LocationPermission.deniedForever) return;
+
+      _userPosition = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 10),
+      );
+    } catch (e) {
+      print('Error getting location: $e');
+      // Try to get from user data
+      if (_apiService.token != null) {
+        try {
+          final userResponse = await _apiService.getUser();
+          if (userResponse['success']) {
+            final userData = userResponse['data'];
+            final lat = userData['current_latitude'];
+            final lng = userData['current_longitude'];
+            if (lat != null && lng != null) {
+              _userPosition = Position(
+                latitude: lat is double ? lat : double.parse(lat.toString()),
+                longitude: lng is double ? lng : double.parse(lng.toString()),
+                timestamp: DateTime.now(),
+                accuracy: 0,
+                altitude: 0,
+                heading: 0,
+                speed: 0,
+                speedAccuracy: 0,
+                altitudeAccuracy: 0,
+                headingAccuracy: 0,
+              );
+            }
+          }
+        } catch (e) {
+          print('Error getting location from user data: $e');
+        }
+      }
+    }
+  }
+
+  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    return Geolocator.distanceBetween(lat1, lon1, lat2, lon2) / 1000; // Convert to km
+  }
+
+  String _formatDistance(Map<String, dynamic> job) {
+    if (job['distance_km'] != null) {
+      final distance = job['distance_km'] is double 
+          ? job['distance_km'] 
+          : double.tryParse(job['distance_km'].toString());
+      if (distance != null && distance.isFinite) {
+        if (distance < 1) {
+          return '${(distance * 1000).toStringAsFixed(0)} m';
+        } else {
+          return '${distance.toStringAsFixed(1)} km';
+        }
+      }
+    } else if (_userPosition != null && job['latitude'] != null && job['longitude'] != null) {
+      final jobLat = job['latitude'] is double ? job['latitude'] : double.tryParse(job['latitude'].toString());
+      final jobLng = job['longitude'] is double ? job['longitude'] : double.tryParse(job['longitude'].toString());
+      if (jobLat != null && jobLng != null) {
+        final distance = _calculateDistance(
+          _userPosition!.latitude,
+          _userPosition!.longitude,
+          jobLat,
+          jobLng,
+        );
+        if (distance < 1) {
+          return '${(distance * 1000).toStringAsFixed(0)} m';
+        } else {
+          return '${distance.toStringAsFixed(1)} km';
+        }
+      }
+    }
+    return 'Jarak tidak diketahui';
+  }
+
+  Future<void> _loadJobs() async {
+    try {
+      setState(() {
+        _isLoading = true;
+        _error = null;
+      });
+
+      await _apiService.loadToken();
+
+      // Get current user ID
+      if (_apiService.token != null) {
+        try {
+          final userResponse = await _apiService.getUser();
+          if (userResponse['success']) {
+            _currentUserId = userResponse['data']['id']?.toString();
+          }
+        } catch (e) {
+          // Ignore if user data fails, proceed without it
+        }
+      }
+
+      // Get user location if filter nearby is enabled
+      if (_filterNearby) {
+        await _getUserLocation();
+      }
+
+      final response = await _apiService.getJobs(
+        category: _selectedCategory?.name,
+        latitude: _filterNearby && _userPosition != null ? _userPosition!.latitude : null,
+        longitude: _filterNearby && _userPosition != null ? _userPosition!.longitude : null,
+        radius: _filterNearby && _userPosition != null ? 10.0 : null,
+      );
+
+      if (response['success']) {
+        // Handle paginated response
+        final data = response['data'];
+        List<Map<String, dynamic>> fetchedJobs = [];
+        if (data is Map && data.containsKey('data')) {
+          fetchedJobs = List<Map<String, dynamic>>.from(data['data']);
+        } else if (data is List) {
+          fetchedJobs = List<Map<String, dynamic>>.from(data);
+        }
+
+        // Filter out jobs created by the current user
+        if (_currentUserId != null) {
+          fetchedJobs.removeWhere(
+            (job) => job['customer_id']?.toString() == _currentUserId,
+          );
+        }
+
+        // Filter out private jobs: assigned_worker_id != null OR additional_info[is_private_order] == true
+        fetchedJobs.removeWhere((job) =>
+          job['assigned_worker_id'] != null ||
+          (job['additional_info'] is Map && job['additional_info']['is_private_order'] == true)
+        );
+
+        // Filter out jobs that are already cancelled
+        fetchedJobs.removeWhere((job) => job['status'] == 'cancelled');
+
+        // Apply search filter
+        if (_searchQuery.isNotEmpty) {
+          final query = _searchQuery.toLowerCase();
+          fetchedJobs = fetchedJobs.where((job) {
+            final title = (job['title'] ?? '').toString().toLowerCase();
+            final description = (job['description'] ?? '').toString().toLowerCase();
+            final customerName = (job['customer']?['name'] ?? job['customer_name'] ?? '').toString().toLowerCase();
+            return title.contains(query) || 
+                   description.contains(query) || 
+                   customerName.contains(query);
+          }).toList();
+        }
+
+        // Calculate distance for each job if user position is available
+        if (_userPosition != null) {
+          for (var job in fetchedJobs) {
+            final jobLat = job['latitude'];
+            final jobLng = job['longitude'];
+            if (jobLat != null && jobLng != null) {
+              final lat = jobLat is double ? jobLat : double.tryParse(jobLat.toString());
+              final lng = jobLng is double ? jobLng : double.tryParse(jobLng.toString());
+              if (lat != null && lng != null) {
+                final distance = _calculateDistance(
+                  _userPosition!.latitude,
+                  _userPosition!.longitude,
+                  lat,
+                  lng,
+                );
+                job['distance_km'] = distance;
+              }
+            }
+          }
+        }
+
+        // Apply sorting
+        fetchedJobs.sort((a, b) {
+          switch (_selectedSort) {
+            case 'price_high':
+              final priceA = _parseToDouble(a['price'] ?? 0);
+              final priceB = _parseToDouble(b['price'] ?? 0);
+              return priceB.compareTo(priceA);
+            case 'price_low':
+              final priceA = _parseToDouble(a['price'] ?? 0);
+              final priceB = _parseToDouble(b['price'] ?? 0);
+              return priceA.compareTo(priceB);
+            case 'newest':
+              try {
+                final dateA = DateTime.parse(a['created_at'] ?? DateTime.now().toIso8601String());
+                final dateB = DateTime.parse(b['created_at'] ?? DateTime.now().toIso8601String());
+                return dateB.compareTo(dateA);
+              } catch (e) {
+                return 0;
+              }
+            case 'distance':
+            default:
+              // Sort by distance if available, otherwise keep original order
+              if (_userPosition != null) {
+                final distA = a['distance_km'] ?? double.infinity;
+                final distB = b['distance_km'] ?? double.infinity;
+                return distA.compareTo(distB);
+              }
+              return 0;
+          }
+        });
+
+        setState(() {
+          _jobs = fetchedJobs;
+          _isLoading = false;
+        });
+      } else {
+        setState(() {
+          _error = response['message'] ?? 'Failed to load jobs';
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _error = 'Error loading jobs: ${e.toString()}';
+        _isLoading = false;
+      });
+    }
+  }
+
+  double _parseToDouble(dynamic value) {
+    if (value == null) return 0.0;
+    if (value is double) return value;
+    if (value is int) return value.toDouble();
+    if (value is String) {
+      return double.tryParse(value) ?? 0.0;
+    }
+    return 0.0;
+  }
+
+  String _formatPrice(dynamic price) {
+    final value = _parseToDouble(price);
+    final formatted = _priceFormatter.format(value).trim();
+    return 'Rp $formatted';
+  }
+
+  Future<void> _applyFiltersAndSort() async {
+    // Reload jobs to get fresh data, then apply filters and sort
+    await _loadJobs();
   }
 
   @override
@@ -37,13 +306,126 @@ class _JobListScreenState extends State<JobListScreen>
     super.dispose();
   }
 
+  String _formatTimeAgo(String? dateString) {
+    if (dateString == null) return 'Unknown time';
+    try {
+      final date = DateTime.parse(dateString);
+      final now = DateTime.now();
+      final difference = now.difference(date);
+
+      if (difference.inDays > 0) {
+        return '${difference.inDays} hari yang lalu';
+      } else if (difference.inHours > 0) {
+        return '${difference.inHours} jam yang lalu';
+      } else if (difference.inMinutes > 0) {
+        return '${difference.inMinutes} menit yang lalu';
+      } else {
+        return 'Baru saja';
+      }
+    } catch (e) {
+      return 'Unknown time';
+    }
+  }
+
+  Color _getCategoryColorFromString(String? category) {
+    switch (category) {
+      case 'cleaning':
+        return const Color(0xFF10B981);
+      case 'maintenance':
+        return const Color(0xFF3B82F6);
+      case 'delivery':
+        return const Color(0xFF8B5CF6);
+      case 'tutoring':
+        return const Color(0xFFF59E0B);
+      case 'photography':
+        return const Color(0xFFEF4444);
+      case 'cooking':
+        return const Color(0xFFF97316);
+      case 'gardening':
+        return const Color(0xFF22C55E);
+      case 'petCare':
+        return const Color(0xFF06B6D4);
+      default:
+        return const Color(0xFF6B7280);
+    }
+  }
+
+  IconData _getCategoryIconFromString(String? category) {
+    switch (category) {
+      case 'cleaning':
+        return Icons.cleaning_services_rounded;
+      case 'maintenance':
+        return Icons.build_rounded;
+      case 'delivery':
+        return Icons.local_shipping_rounded;
+      case 'tutoring':
+        return Icons.school_rounded;
+      case 'photography':
+        return Icons.camera_alt_rounded;
+      case 'cooking':
+        return Icons.restaurant_rounded;
+      case 'gardening':
+        return Icons.eco_rounded;
+      case 'petCare':
+        return Icons.pets_rounded;
+      default:
+        return Icons.work_rounded;
+    }
+  }
+
+  String _getCategoryDisplayName(String? category) {
+    switch (category) {
+      case 'cleaning':
+        return 'Pembersihan';
+      case 'maintenance':
+        return 'Perbaikan';
+      case 'delivery':
+        return 'Pengiriman';
+      case 'tutoring':
+        return 'Edukasi';
+      case 'photography':
+        return 'Fotografi';
+      case 'cooking':
+        return 'Kuliner';
+      case 'gardening':
+        return 'Kebun';
+      case 'petCare':
+        return 'Perawatan Hewan';
+      default:
+        return 'Lainnya';
+    }
+  }
+
+  JobCategory _stringToJobCategory(String? category) {
+    switch (category) {
+      case 'cleaning':
+        return JobCategory.cleaning;
+      case 'maintenance':
+        return JobCategory.maintenance;
+      case 'delivery':
+        return JobCategory.delivery;
+      case 'tutoring':
+        return JobCategory.tutoring;
+      case 'photography':
+        return JobCategory.photography;
+      case 'cooking':
+        return JobCategory.cooking;
+      case 'gardening':
+        return JobCategory.gardening;
+      case 'petCare':
+        return JobCategory.petCare;
+      default:
+        return JobCategory.other;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[50],
+      backgroundColor: const Color(0xFFF8FAFC),
       body: CustomScrollView(
         slivers: [
-          // App Bar
+          // Modern App Bar
           _buildSliverAppBar(),
           // Search Bar
           _buildSearchBar(),
@@ -60,60 +442,137 @@ class _JobListScreenState extends State<JobListScreen>
 
   Widget _buildSliverAppBar() {
     return SliverAppBar(
-      expandedHeight: 140,
+      expandedHeight: 160,
       floating: false,
       pinned: true,
-      backgroundColor: Colors.white,
+      backgroundColor: Colors.transparent,
       elevation: 0,
       flexibleSpace: FlexibleSpaceBar(
-        title: Text(
-          '',
-          style: TextStyle(
-            color: Colors.grey[800],
-            fontWeight: FontWeight.bold,
-            fontSize: 20,
-          ),
-        ),
         background: Container(
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
               colors: [
-                Color(0xFF2D9CDB), // Biru Cerah untuk Brand
-                Color(0xFF1E88E5), // Biru yang lebih gelap
-                Color(0xFF1976D2), // Biru gelap
+                Theme.of(context).colorScheme.primary,
+                Theme.of(context).colorScheme.primary.withOpacity(0.8),
               ],
+            ),
+            borderRadius: const BorderRadius.vertical(
+              bottom: Radius.circular(30),
             ),
           ),
-          child: Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const SizedBox(height: 40),
-                Container(
-                  padding: const EdgeInsets.all(16),
+          child: Stack(
+            children: [
+              // Decorative vector elements
+              Positioned(
+                right: -40,
+                top: -40,
+                child: Container(
+                  width: 150,
+                  height: 150,
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(16),
-                  ),
-                  child: const Icon(
-                    Icons.work_outline,
-                    color: Colors.white,
-                    size: 36,
+                    shape: BoxShape.circle,
+                    color: Colors.white.withOpacity(0.1),
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  'Temukan Pekerjaan Terdekat',
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.9),
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
+              ),
+              Positioned(
+                right: 80,
+                top: 60,
+                child: Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withOpacity(0.08),
                   ),
                 ),
-              ],
-            ),
+              ),
+              Positioned(
+                left: -30,
+                bottom: 20,
+                child: Container(
+                  width: 100,
+                  height: 100,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withOpacity(0.06),
+                  ),
+                ),
+              ),
+              // Wave pattern overlay
+              CustomPaint(
+                size: Size.infinite,
+                painter: WavePatternPainter(),
+              ),
+              SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(18),
+                              border: Border.all(
+                                color: Colors.white.withOpacity(0.3),
+                                width: 2,
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.1),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
+                            ),
+                            child: const Icon(
+                              Icons.work_outline_rounded,
+                              color: Colors.white,
+                              size: 28,
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Temukan Pekerjaan',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: -0.5,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  _selectedCategory != null
+                                      ? 'Kategori: ${_getCategoryName(_selectedCategory!)}'
+                                      : 'Semua kategori tersedia',
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(0.9),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -122,47 +581,67 @@ class _JobListScreenState extends State<JobListScreen>
 
   Widget _buildSearchBar() {
     return SliverToBoxAdapter(
-      child: Container(
-        padding: const EdgeInsets.all(16),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 16),
         child: Container(
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(20),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.05),
-                blurRadius: 15,
-                offset: const Offset(0, 5),
+                color: Colors.black.withOpacity(0.06),
+                blurRadius: 20,
+                offset: const Offset(0, 4),
               ),
             ],
-            border: Border.all(color: Colors.grey[200]!),
+            border: Border.all(
+              color: const Color(0xFFE2E8F0),
+              width: 1,
+            ),
           ),
           child: TextField(
             onChanged: (value) {
               setState(() {
                 _searchQuery = value;
               });
+              // Debounce search
+              Future.delayed(const Duration(milliseconds: 500), () {
+                if (_searchQuery == value) {
+                  _applyFiltersAndSort();
+                }
+              });
             },
-            style: const TextStyle(color: Colors.black87),
+            style: const TextStyle(
+              color: Color(0xFF1E293B),
+              fontSize: 15,
+            ),
             decoration: InputDecoration(
               hintText: 'Cari pekerjaan berdasarkan judul atau deskripsi...',
-              hintStyle: TextStyle(color: Colors.grey[500]),
-              prefixIcon: Icon(Icons.search, color: Colors.grey[500]),
+              hintStyle: TextStyle(color: Colors.grey[400], fontSize: 15),
+              prefixIcon: Icon(
+                Icons.search_rounded,
+                color: const Color(0xFF2563EB),
+                size: 24,
+              ),
               suffixIcon: _searchQuery.isNotEmpty
                   ? IconButton(
-                      icon: Icon(Icons.clear, color: Colors.grey[500]),
-                      onPressed: () {
-                        setState(() {
-                          _searchQuery = '';
-                        });
-                        _showNotification('Pencarian dihapus');
-                      },
+                      icon: Icon(
+                        Icons.clear_rounded,
+                        color: Colors.grey[400],
+                        size: 20,
+                      ),
+                        onPressed: () {
+                          setState(() {
+                            _searchQuery = '';
+                          });
+                          _applyFiltersAndSort();
+                        },
                     )
                   : null,
               border: InputBorder.none,
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: 20,
-                vertical: 16,
+                vertical: 18,
               ),
             ),
           ),
@@ -174,8 +653,8 @@ class _JobListScreenState extends State<JobListScreen>
   Widget _buildFilterChips() {
     return SliverToBoxAdapter(
       child: Container(
-        height: 60,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
+        height: 70,
+        padding: const EdgeInsets.symmetric(horizontal: 24),
         child: ListView.builder(
           scrollDirection: Axis.horizontal,
           itemCount: JobCategory.values.length + 1,
@@ -206,47 +685,61 @@ class _JobListScreenState extends State<JobListScreen>
         ? _getCategoryColor(category)
         : const Color(0xFF6B7280);
 
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          _selectedCategory = category;
-        });
-        _showNotification('Filter: $label');
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        decoration: BoxDecoration(
-          color: isSelected ? color : Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: isSelected ? color : Colors.grey[300]!),
-          boxShadow: isSelected
-              ? [
-                  BoxShadow(
-                    color: color.withOpacity(0.3),
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
-                  ),
-                ]
-              : null,
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              category != null ? _getCategoryIcon(category) : Icons.apps,
-              size: 16,
-              color: isSelected ? Colors.white : color,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () {
+          setState(() {
+            _selectedCategory = category;
+          });
+          _loadJobs();
+        },
+        borderRadius: BorderRadius.circular(20),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+          decoration: BoxDecoration(
+            color: isSelected ? color : Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: isSelected ? color : const Color(0xFFE2E8F0),
+              width: isSelected ? 0 : 1,
             ),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: TextStyle(
-                color: isSelected ? Colors.white : Colors.grey[700],
-                fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-                fontSize: 12,
+            boxShadow: isSelected
+                ? [
+                    BoxShadow(
+                      color: color.withOpacity(0.4),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ]
+                : [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.03),
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                category != null ? _getCategoryIcon(category) : Icons.apps_rounded,
+                size: 18,
+                color: isSelected ? Colors.white : color,
               ),
-            ),
-          ],
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: TextStyle(
+                  color: isSelected ? Colors.white : const Color(0xFF1E293B),
+                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
+                  fontSize: 13,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -257,113 +750,231 @@ class _JobListScreenState extends State<JobListScreen>
       {
         'value': 'distance',
         'label': 'Terdekat',
-        'icon': Icons.location_on,
-        'color': const Color(0xFF27AE60),
-      }, // Hijau untuk Aksi / CTA
+        'icon': Icons.location_on_rounded,
+        'color': const Color(0xFF10B981),
+      },
       {
         'value': 'price_high',
         'label': 'Harga Tertinggi',
-        'icon': Icons.arrow_upward,
-        'color': const Color(0xFFF2C94C),
-      }, // Kuning / Emas untuk Badge
+        'icon': Icons.trending_up_rounded,
+        'color': const Color(0xFFF59E0B),
+      },
       {
         'value': 'price_low',
         'label': 'Harga Terendah',
-        'icon': Icons.arrow_downward,
-        'color': const Color(0xFF2D9CDB),
-      }, // Biru Cerah untuk Brand
+        'icon': Icons.trending_down_rounded,
+        'color': const Color(0xFF2563EB),
+      },
       {
         'value': 'newest',
         'label': 'Terbaru',
-        'icon': Icons.schedule,
-        'color': const Color(0xFFEB5757),
-      }, // Merah untuk SOS / Darurat
+        'icon': Icons.access_time_rounded,
+        'color': const Color(0xFF8B5CF6),
+      },
+    ];
+
+    // Add "Sekitar" filter option
+    final filterOptions = <Map<String, dynamic>>[
+      {
+        'value': 'nearby',
+        'label': 'Sekitar',
+        'icon': Icons.near_me_rounded,
+        'color': const Color(0xFF10B981),
+      },
     ];
 
     return SliverToBoxAdapter(
       child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Row(
+        padding: const EdgeInsets.fromLTRB(24, 8, 24, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(Icons.sort, color: Colors.grey[600], size: 20),
-            const SizedBox(width: 8),
-            Text(
-              'Urutkan:',
-              style: TextStyle(
-                color: Colors.grey[700],
-                fontWeight: FontWeight.w600,
-              ),
+            Row(
+              children: [
+                Icon(
+                  Icons.sort_rounded,
+                  color: const Color(0xFF64748B),
+                  size: 20,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Urutkan:',
+                  style: TextStyle(
+                    color: const Color(0xFF64748B),
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: sortOptions.map((option) {
-                    final isSelected =
-                        _selectedSort == option['value'] as String;
+            const SizedBox(height: 12),
+            // Filter "Sekitar" option
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  ...filterOptions.map((option) {
+                    final isSelected = _filterNearby;
                     final color = option['color'] as Color;
                     final icon = option['icon'] as IconData;
                     final label = option['label'] as String;
                     return Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: GestureDetector(
+                      padding: const EdgeInsets.only(right: 10),
+                      child: Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          onTap: () {
+                            setState(() {
+                              _filterNearby = !_filterNearby;
+                              if (_filterNearby) {
+                                _selectedSort = 'distance'; // Auto sort by distance when nearby filter is on
+                              }
+                            });
+                            _applyFiltersAndSort();
+                          },
+                          borderRadius: BorderRadius.circular(20),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 10,
+                            ),
+                            decoration: BoxDecoration(
+                              color: isSelected ? color : Colors.white,
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: isSelected ? color : const Color(0xFFE2E8F0),
+                                width: isSelected ? 0 : 1,
+                              ),
+                              boxShadow: isSelected
+                                  ? [
+                                      BoxShadow(
+                                        color: color.withOpacity(0.4),
+                                        blurRadius: 12,
+                                        offset: const Offset(0, 4),
+                                      ),
+                                    ]
+                                  : [
+                                      BoxShadow(
+                                        color: Colors.black.withOpacity(0.03),
+                                        blurRadius: 8,
+                                        offset: const Offset(0, 2),
+                                      ),
+                                    ],
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  icon,
+                                  size: 16,
+                                  color: isSelected ? Colors.white : color,
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  label,
+                                  style: TextStyle(
+                                    color: isSelected
+                                        ? Colors.white
+                                        : const Color(0xFF1E293B),
+                                    fontSize: 13,
+                                    fontWeight: isSelected
+                                        ? FontWeight.w600
+                                        : FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
+                  const SizedBox(width: 8),
+                  const Text(
+                    '|',
+                    style: TextStyle(
+                      color: Color(0xFFE2E8F0),
+                      fontSize: 20,
+                    ),
+                  ),
+                  const SizedBox(width: 8), ...sortOptions.map((option) {
+                  final isSelected =
+                      _selectedSort == option['value'] as String;
+                  final color = option['color'] as Color;
+                  final icon = option['icon'] as IconData;
+                  final label = option['label'] as String;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 10),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
                         onTap: () {
                           setState(() {
                             _selectedSort = option['value'] as String;
                           });
-                          _showNotification('Diurutkan: $label');
+                          _applyFiltersAndSort();
                         },
-                        child: Container(
+                        borderRadius: BorderRadius.circular(20),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 8,
+                            horizontal: 16,
+                            vertical: 10,
                           ),
                           decoration: BoxDecoration(
                             color: isSelected ? color : Colors.white,
                             borderRadius: BorderRadius.circular(20),
                             border: Border.all(
-                              color: isSelected ? color : Colors.grey[300]!,
+                              color: isSelected ? color : const Color(0xFFE2E8F0),
+                              width: isSelected ? 0 : 1,
                             ),
                             boxShadow: isSelected
                                 ? [
                                     BoxShadow(
-                                      color: color.withOpacity(0.3),
+                                      color: color.withOpacity(0.4),
+                                      blurRadius: 12,
+                                      offset: const Offset(0, 4),
+                                    ),
+                                  ]
+                                : [
+                                    BoxShadow(
+                                      color: Colors.black.withOpacity(0.03),
                                       blurRadius: 8,
                                       offset: const Offset(0, 2),
                                     ),
-                                  ]
-                                : null,
+                                  ],
                           ),
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Icon(
                                 icon,
-                                size: 14,
+                                size: 16,
                                 color: isSelected ? Colors.white : color,
                               ),
-                              const SizedBox(width: 4),
+                              const SizedBox(width: 6),
                               Text(
                                 label,
                                 style: TextStyle(
                                   color: isSelected
                                       ? Colors.white
-                                      : Colors.grey[700],
-                                  fontSize: 12,
+                                      : const Color(0xFF1E293B),
+                                  fontSize: 13,
                                   fontWeight: isSelected
                                       ? FontWeight.w600
-                                      : FontWeight.normal,
+                                      : FontWeight.w500,
                                 ),
                               ),
                             ],
                           ),
                         ),
                       ),
-                    );
-                  }).toList(),
-                ),
-              ),
+                    ),
+                  );
+                }),
+                ],
+            ),
             ),
           ],
         ),
@@ -372,232 +983,497 @@ class _JobListScreenState extends State<JobListScreen>
   }
 
   Widget _buildJobList() {
-    final filteredJobs = _getFilteredJobs();
+    if (_isLoading) {
+      return SliverPadding(
+        padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+        sliver: SliverList(
+          delegate: SliverChildBuilderDelegate(
+            (context, index) => Padding(
+              padding: const EdgeInsets.only(bottom: 16),
+              child: _buildJobCardSkeleton(),
+            ),
+            childCount: 5,
+          ),
+        ),
+      );
+    }
+
+    if (_error != null) {
+      return SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Container(
+            padding: const EdgeInsets.all(32),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.04),
+                  blurRadius: 20,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Column(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEF4444).withOpacity(0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.error_outline_rounded,
+                    color: Color(0xFFEF4444),
+                    size: 48,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Text(
+                  'Terjadi Kesalahan',
+                  style: const TextStyle(
+                    color: Color(0xFF1E293B),
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  _error!,
+                  style: const TextStyle(
+                    color: Color(0xFF64748B),
+                    fontSize: 14,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 24),
+                ElevatedButton.icon(
+                  onPressed: _loadJobs,
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('Coba Lagi'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF2563EB),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 24,
+                      vertical: 14,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (_jobs.isEmpty) {
+      return SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Container(
+            padding: const EdgeInsets.all(40),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.04),
+                  blurRadius: 20,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Column(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2563EB).withOpacity(0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.search_off_rounded,
+                    color: Color(0xFF2563EB),
+                    size: 48,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  'Tidak Ada Pekerjaan',
+                  style: TextStyle(
+                    color: Color(0xFF1E293B),
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Tidak ada pekerjaan yang tersedia saat ini.\nCoba filter atau kategori lain.',
+                  style: const TextStyle(
+                    color: Color(0xFF64748B),
+                    fontSize: 14,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
 
     return SliverPadding(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
       sliver: SliverList(
         delegate: SliverChildBuilderDelegate((context, index) {
-          if (index >= filteredJobs.length) return null;
-          final job = filteredJobs[index];
-          return FadeTransition(
-            opacity: _fadeAnimation,
-            child: _buildJobCard(job),
+          if (index >= _jobs.length) return null;
+          final job = _jobs[index];
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: FadeTransition(
+              opacity: _fadeAnimation,
+              child: _buildJobCardFromApi(job),
+            ),
           );
-        }, childCount: filteredJobs.length),
+        }, childCount: _jobs.length),
       ),
     );
   }
 
-  Widget _buildJobCard(JobModel job) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 15,
-            offset: const Offset(0, 5),
+  Widget _buildJobCardSkeleton() {
+    return Shimmer.fromColors(
+      baseColor: Colors.grey[300]!,
+      highlightColor: Colors.grey[100]!,
+      child: Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: const Color(0xFFE2E8F0),
+            width: 1,
           ),
-        ],
-        border: Border.all(color: Colors.grey[200]!),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Container(
+                  width: 100,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                Container(
+                  width: 80,
+                  height: 24,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Container(
+              width: double.infinity,
+              height: 20,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              width: 200,
+              height: 20,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              width: double.infinity,
+              height: 14,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              width: 150,
+              height: 14,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Container(
+                  width: 120,
+                  height: 14,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                const Spacer(),
+                Container(
+                  width: 100,
+                  height: 14,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
+    );
+  }
+
+  Widget _buildJobCardFromApi(Map<String, dynamic> job) {
+    final categoryColor = _getCategoryColorFromString(job['category']);
+    
+    return Material(
+      color: Colors.transparent,
       child: InkWell(
         onTap: () {
           Navigator.push(
             context,
-            MaterialPageRoute(builder: (context) => JobDetailScreen(job: job)),
+            MaterialPageRoute(
+              builder: (context) => JobDetailScreen(jobId: job['id'].toString()),
+            ),
           );
         },
         borderRadius: BorderRadius.circular(20),
-        child: Padding(
+        child: Container(
           padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.06),
+                blurRadius: 20,
+                offset: const Offset(0, 4),
+              ),
+              BoxShadow(
+                color: categoryColor.withOpacity(0.08),
+                blurRadius: 15,
+                offset: const Offset(0, 2),
+              ),
+            ],
+            border: Border.all(
+              color: categoryColor.withOpacity(0.15),
+              width: 1,
+            ),
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Header
+              // Header with category and price
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          categoryColor,
+                          categoryColor.withOpacity(0.8),
+                        ],
+                      ),
+                      borderRadius: BorderRadius.circular(14),
+                      boxShadow: [
+                        BoxShadow(
+                          color: categoryColor.withOpacity(0.3),
+                          blurRadius: 8,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _getCategoryIconFromString(job['category']),
+                          size: 16,
+                          color: Colors.white,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          _getCategoryDisplayName(job['category']),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF10B981), Color(0xFF059669)],
+                      ),
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFF10B981).withOpacity(0.3),
+                          blurRadius: 8,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 140),
+                      child: Text(
+                        _formatPrice(job['price']),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+
+              // Job title
+              Text(
+                job['title'] ?? 'No Title',
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF1E293B),
+                  letterSpacing: -0.3,
+                ),
+              ),
+              const SizedBox(height: 10),
+
+              // Job description
+              Text(
+                job['description'] ?? 'No Description',
+                style: const TextStyle(
+                  fontSize: 14,
+                  color: Color(0xFF64748B),
+                  height: 1.5,
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 18),
+
+              // Location and time
               Row(
                 children: [
                   Container(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(8),
                     decoration: BoxDecoration(
-                      color: _getCategoryColor(job.category).withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(12),
+                      color: const Color(0xFF2563EB).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Icon(
-                      _getCategoryIcon(job.category),
-                      color: _getCategoryColor(job.category),
-                      size: 24,
+                    child: const Icon(
+                      Icons.location_on_rounded,
+                      size: 16,
+                      color: Color(0xFF2563EB),
                     ),
                   ),
-                  const SizedBox(width: 16),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          job.title,
+                          job['address'] ?? 'No Address',
                           style: const TextStyle(
-                            color: Color(0xFF1E293B),
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
+                            fontSize: 13,
+                            color: Color(0xFF64748B),
+                            fontWeight: FontWeight.w500,
                           ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            Text(
-                              _getCategoryName(job.category),
-                              style: TextStyle(
-                                color: Colors.grey[600],
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500,
+                        if (job['distance_km'] != null || (_userPosition != null && job['latitude'] != null && job['longitude'] != null)) ...[
+                          const SizedBox(height: 4),
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.near_me_rounded,
+                                size: 12,
+                                color: const Color(0xFF10B981),
                               ),
-                            ),
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: _getStatusColor(
-                                  job.status,
-                                ).withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Text(
-                                _getStatusText(job.status),
-                                style: TextStyle(
-                                  color: _getStatusColor(job.status),
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w600,
+                              const SizedBox(width: 4),
+                              Flexible(
+                                child: Text(
+                                  _formatDistance(job),
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Color(0xFF10B981),
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
                               ),
-                            ),
-                          ],
-                        ),
+                            ],
+                          ),
+                        ],
                       ],
                     ),
                   ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              // Description
-              Text(
-                job.description,
-                style: TextStyle(
-                  color: Colors.grey[600],
-                  fontSize: 13,
-                  height: 1.4,
-                ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              const SizedBox(height: 12),
-              // Location and Price
-              Row(
-                children: [
-                  Icon(Icons.location_on, size: 16, color: Colors.grey[500]),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(
-                      job.location.address,
-                      style: TextStyle(color: Colors.grey[600], fontSize: 11),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  const SizedBox(width: 16),
+                  const SizedBox(width: 12),
                   Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
-                    ),
+                    padding: const EdgeInsets.all(8),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF10B981).withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(12),
+                      color: const Color(0xFF8B5CF6).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Text(
-                      'Rp ${job.price.toStringAsFixed(0)}',
-                      style: const TextStyle(
-                        color: Color(0xFF10B981),
-                        fontWeight: FontWeight.w600,
-                        fontSize: 14,
-                      ),
+                    child: const Icon(
+                      Icons.access_time_rounded,
+                      size: 16,
+                      color: Color(0xFF8B5CF6),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _formatTimeAgo(job['created_at']),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF64748B),
+                      fontWeight: FontWeight.w500,
                     ),
                   ),
                 ],
-              ),
-              const SizedBox(height: 12),
-              const Divider(),
-              const SizedBox(height: 4),
-              // Footer
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    _getTimeAgo(job.createdAt),
-                    style: TextStyle(color: Colors.grey[500], fontSize: 12),
-                  ),
-                  Text(
-                    '${_getDistance(job)} km dari Anda',
-                    style: TextStyle(color: Colors.grey[500], fontSize: 12),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () {
-                    showDialog(
-                      context: context,
-                      builder: (context) => AlertDialog(
-                        title: const Text('Konfirmasi'),
-                        content: Text(
-                          'Apakah Anda yakin ingin mengajukan diri untuk pekerjaan "${job.title}"?',
-                        ),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(context),
-                            child: const Text('Batal'),
-                          ),
-                          ElevatedButton(
-                            onPressed: () {
-                              Navigator.pop(context);
-                              _showApplyDialog(job);
-                            },
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(
-                                0xFF27AE60,
-                              ), // Hijau untuk Aksi / CTA
-                              foregroundColor: Colors.white,
-                            ),
-                            child: const Text('Ya, Ajukan'),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(
-                      0xFF27AE60,
-                    ), // Hijau untuk Aksi / CTA
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                  ),
-                  icon: const Icon(Icons.send_rounded, size: 18),
-                  label: const Text(
-                    'Ajukan Diri',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-                  ),
-                ),
               ),
             ],
           ),
@@ -606,239 +1482,24 @@ class _JobListScreenState extends State<JobListScreen>
     );
   }
 
-  void _showApplyDialog(JobModel job) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Row(
-          children: [
-            Icon(Icons.work, color: const Color(0xFF10B981)),
-            const SizedBox(width: 8),
-            const Text(
-              'Ajukan Diri',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                color: Colors.black87,
-              ),
-            ),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Apakah Anda yakin ingin mengajukan diri untuk pekerjaan:',
-              style: TextStyle(color: Colors.grey[600], fontSize: 14),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '"${job.title}"',
-              style: const TextStyle(
-                fontWeight: FontWeight.bold,
-                color: Colors.black87,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Harga: Rp ${job.price.toStringAsFixed(0)}',
-              style: TextStyle(
-                color: const Color(0xFF10B981),
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Batal'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _showNotification('Berhasil mengajukan diri!');
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(
-                0xFF27AE60,
-              ), // Hijau untuk Aksi / CTA
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('Ya, Ajukan'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  List<JobModel> _getFilteredJobs() {
-    List<JobModel> jobs = _getMockJobs();
-
-    // Filter by category
-    if (_selectedCategory != null) {
-      jobs = jobs.where((job) => job.category == _selectedCategory).toList();
-    }
-
-    // Filter by search query
-    if (_searchQuery.isNotEmpty) {
-      jobs = jobs
-          .where(
-            (job) =>
-                job.title.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-                job.description.toLowerCase().contains(
-                  _searchQuery.toLowerCase(),
-                ),
-          )
-          .toList();
-    }
-
-    // Sort jobs
-    switch (_selectedSort) {
-      case 'distance':
-        jobs.sort((a, b) => _getDistance(a).compareTo(_getDistance(b)));
-        break;
-      case 'price_high':
-        jobs.sort((a, b) => b.price.compareTo(a.price));
-        break;
-      case 'price_low':
-        jobs.sort((a, b) => a.price.compareTo(b.price));
-        break;
-      case 'newest':
-        jobs.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-        break;
-    }
-
-    return jobs;
-  }
-
-  List<JobModel> _getMockJobs() {
-    return [
-      JobModel(
-        id: '1',
-        customerId: 'customer1',
-        title: 'Bersihkan Rumah 3 Kamar',
-        description:
-            'Pembersihan menyeluruh rumah 3 kamar tidur, 2 kamar mandi, dan ruang tamu. Termasuk mencuci piring dan merapikan barang.',
-        category: JobCategory.cleaning,
-        price: 150000,
-        location: Location(
-          latitude: -6.2088,
-          longitude: 106.8456,
-          address: 'Jakarta Selatan, Kemang',
-        ),
-        createdAt: DateTime.now().subtract(const Duration(hours: 2)),
-        applicantIds: ['worker1', 'worker2'],
-      ),
-      JobModel(
-        id: '2',
-        customerId: 'customer2',
-        title: 'Perbaiki AC Rusak',
-        description:
-            'AC tidak dingin, perlu perbaikan dan isi freon. Unit AC 1.5 PK di ruang tamu.',
-        category: JobCategory.maintenance,
-        price: 200000,
-        location: Location(
-          latitude: -6.2088,
-          longitude: 106.8456,
-          address: 'Jakarta Pusat, Menteng',
-        ),
-        createdAt: DateTime.now().subtract(const Duration(hours: 5)),
-        applicantIds: ['worker3'],
-      ),
-      JobModel(
-        id: '3',
-        customerId: 'customer3',
-        title: 'Les Matematika SMA',
-        description:
-            'Bimbingan belajar matematika untuk siswa SMA kelas 12. Persiapan UTBK. 2x seminggu.',
-        category: JobCategory.tutoring,
-        price: 100000,
-        location: Location(
-          latitude: -6.2088,
-          longitude: 106.8456,
-          address: 'Jakarta Utara, Kelapa Gading',
-        ),
-        createdAt: DateTime.now().subtract(const Duration(days: 1)),
-        applicantIds: ['worker4', 'worker5', 'worker6'],
-      ),
-      JobModel(
-        id: '4',
-        customerId: 'customer4',
-        title: 'Foto Prewedding',
-        description:
-            'Sesi foto prewedding outdoor di Taman Suropati. 2-3 jam sesi foto dengan 50 hasil edit.',
-        category: JobCategory.photography,
-        price: 2500000,
-        location: Location(
-          latitude: -6.2088,
-          longitude: 106.8456,
-          address: 'Jakarta Pusat, Menteng',
-        ),
-        createdAt: DateTime.now().subtract(const Duration(hours: 8)),
-        applicantIds: ['worker7'],
-      ),
-      JobModel(
-        id: '5',
-        customerId: 'customer5',
-        title: 'Catering 50 Orang',
-        description:
-            'Catering untuk acara kantor 50 orang. Menu nasi kotak dengan lauk pauk lengkap.',
-        category: JobCategory.cooking,
-        price: 500000,
-        location: Location(
-          latitude: -6.2088,
-          longitude: 106.8456,
-          address: 'Jakarta Barat, Kebon Jeruk',
-        ),
-        createdAt: DateTime.now().subtract(const Duration(hours: 12)),
-        applicantIds: ['worker8', 'worker9'],
-      ),
-      JobModel(
-        id: '6',
-        customerId: 'customer6',
-        title: 'Kirim Dokumen',
-        description:
-            'Pengiriman dokumen penting ke kantor pusat. Same day delivery dalam Jakarta.',
-        category: JobCategory.delivery,
-        price: 25000,
-        location: Location(
-          latitude: -6.2088,
-          longitude: 106.8456,
-          address: 'Jakarta Selatan, Pondok Indah',
-        ),
-        createdAt: DateTime.now().subtract(const Duration(hours: 1)),
-        applicantIds: ['worker10'],
-      ),
-    ];
-  }
-
-  double _getDistance(JobModel job) {
-    // Mock distance calculation
-    final distances = [0.5, 1.2, 2.1, 0.8, 3.5, 1.8];
-    return distances[job.id.hashCode % distances.length];
-  }
-
   Color _getCategoryColor(JobCategory category) {
     switch (category) {
       case JobCategory.cleaning:
         return const Color(0xFF10B981);
       case JobCategory.maintenance:
-        return const Color(0xFFF59E0B);
-      case JobCategory.delivery:
         return const Color(0xFF3B82F6);
-      case JobCategory.tutoring:
+      case JobCategory.delivery:
         return const Color(0xFF8B5CF6);
+      case JobCategory.tutoring:
+        return const Color(0xFFF59E0B);
       case JobCategory.photography:
         return const Color(0xFFEF4444);
       case JobCategory.cooking:
-        return const Color(0xFFEC4899);
+        return const Color(0xFFF97316);
       case JobCategory.gardening:
-        return const Color(0xFF059669);
+        return const Color(0xFF22C55E);
       case JobCategory.petCare:
-        return const Color(0xFF6366F1);
+        return const Color(0xFF06B6D4);
       case JobCategory.other:
         return const Color(0xFF6B7280);
     }
@@ -847,23 +1508,23 @@ class _JobListScreenState extends State<JobListScreen>
   IconData _getCategoryIcon(JobCategory category) {
     switch (category) {
       case JobCategory.cleaning:
-        return Icons.cleaning_services;
+        return Icons.cleaning_services_rounded;
       case JobCategory.maintenance:
-        return Icons.build;
+        return Icons.build_rounded;
       case JobCategory.delivery:
-        return Icons.delivery_dining;
+        return Icons.local_shipping_rounded;
       case JobCategory.tutoring:
-        return Icons.school;
+        return Icons.school_rounded;
       case JobCategory.photography:
-        return Icons.camera_alt;
+        return Icons.camera_alt_rounded;
       case JobCategory.cooking:
-        return Icons.restaurant;
+        return Icons.restaurant_rounded;
       case JobCategory.gardening:
-        return Icons.local_florist;
+        return Icons.eco_rounded;
       case JobCategory.petCare:
-        return Icons.pets;
+        return Icons.pets_rounded;
       case JobCategory.other:
-        return Icons.more_horiz;
+        return Icons.work_rounded;
     }
   }
 
@@ -882,56 +1543,11 @@ class _JobListScreenState extends State<JobListScreen>
       case JobCategory.cooking:
         return 'Kuliner';
       case JobCategory.gardening:
-        return 'Taman';
+        return 'Kebun';
       case JobCategory.petCare:
         return 'Perawatan Hewan';
       case JobCategory.other:
         return 'Lainnya';
-    }
-  }
-
-  Color _getStatusColor(JobStatus status) {
-    switch (status) {
-      case JobStatus.pending:
-        return const Color(0xFFF59E0B);
-      case JobStatus.inProgress:
-        return const Color(0xFF3B82F6);
-      case JobStatus.completed:
-        return const Color(0xFF10B981);
-      case JobStatus.cancelled:
-        return const Color(0xFFEF4444);
-      case JobStatus.disputed:
-        return const Color(0xFF8B5CF6);
-    }
-  }
-
-  String _getStatusText(JobStatus status) {
-    switch (status) {
-      case JobStatus.pending:
-        return 'Menunggu';
-      case JobStatus.inProgress:
-        return 'Berlangsung';
-      case JobStatus.completed:
-        return 'Selesai';
-      case JobStatus.cancelled:
-        return 'Dibatalkan';
-      case JobStatus.disputed:
-        return 'Dispute';
-    }
-  }
-
-  String _getTimeAgo(DateTime dateTime) {
-    final now = DateTime.now();
-    final difference = now.difference(dateTime);
-
-    if (difference.inDays > 0) {
-      return '${difference.inDays} hari yang lalu';
-    } else if (difference.inHours > 0) {
-      return '${difference.inHours} jam yang lalu';
-    } else if (difference.inMinutes > 0) {
-      return '${difference.inMinutes} menit yang lalu';
-    } else {
-      return 'Baru saja';
     }
   }
 
@@ -941,7 +1557,7 @@ class _JobListScreenState extends State<JobListScreen>
         content: Row(
           children: [
             const Icon(
-              Icons.check_circle_outline,
+              Icons.check_circle_outline_rounded,
               color: Colors.white,
               size: 20,
             ),
@@ -957,12 +1573,54 @@ class _JobListScreenState extends State<JobListScreen>
             ),
           ],
         ),
-        backgroundColor: const Color(0xFF27AE60), // Hijau untuk Aksi / CTA
+        backgroundColor: const Color(0xFF10B981),
         behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         margin: const EdgeInsets.all(16),
         duration: const Duration(seconds: 2),
       ),
     );
   }
+}
+
+// Wave Pattern Painter for decorative background
+class WavePatternPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white.withOpacity(0.1)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+
+    var path = Path();
+    path.moveTo(0, size.height * 0.4);
+
+    for (var i = 0; i < size.width; i += 60) {
+      path.quadraticBezierTo(
+        i + 30,
+        size.height * 0.25,
+        i + 60,
+        size.height * 0.4,
+      );
+    }
+
+    canvas.drawPath(path, paint);
+
+    var path2 = Path();
+    path2.moveTo(0, size.height * 0.7);
+
+    for (var i = 0; i < size.width; i += 50) {
+      path2.quadraticBezierTo(
+        i + 25,
+        size.height * 0.85,
+        i + 50,
+        size.height * 0.7,
+      );
+    }
+
+    canvas.drawPath(path2, paint);
+  }
+
+  @override
+  bool shouldRepaint(CustomPainter oldDelegate) => false;
 }
