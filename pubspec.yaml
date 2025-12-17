@@ -1,5 +1,5 @@
-name: tubespemob
-description: "A new Flutter project."
+name: servify
+description: "A Flutter application for on-demand services."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -34,10 +34,24 @@ dependencies:
   url_launcher: ^6.1.12 # atau versi terbaru
   provider: ^6.1.2
   shared_preferences: ^2.2.3
-
+  google_fonts: ^6.2.1
+  http: ^1.1.0
+  geolocator: ^14.0.2
+  geocoding: ^4.0.0
+  intl: ^0.20.2
+  image_picker: ^1.0.7
+  permission_handler: ^12.0.1
+  cached_network_image: ^3.3.1
+  flutter_svg: ^2.0.10+1
+  firebase_core: ^2.0.0
+  firebase_messaging: ^14.0.0
+  flutter_local_notifications: ^17.2.3
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  change_app_package_name: ^1.5.0
+  flutter_native_splash: ^2.4.1
+
 
 dev_dependencies:
   flutter_test:
@@ -49,6 +63,7 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.13.1
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -60,6 +75,25 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # Add this assets section under flutter:
+  assets:
+    - assets/image/
+    - assets/logo/
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/logo/Servify.png"
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/logo/Servify.png"
+
+flutter_native_splash:
+  color: "#ffffff"
+  image: assets/logo/Servify-logo.png
+  android_12:
+    image: assets/logo/Servify-logo.png
+    icon_background_color: "#ffffff"
 
   # To add assets to your application, add an assets section, like this:
   # assets:
