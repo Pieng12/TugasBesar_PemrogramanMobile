@@ -1,4 +1,4 @@
-package com.example.tubespemob
+package com.servify.app
 
 import io.flutter.embedding.android.FlutterActivity
 
